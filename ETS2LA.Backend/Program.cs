@@ -1,6 +1,7 @@
 ﻿using ETS2LA.Logging;
 using ETS2LA.Controls;
 using ETS2LA.Audio;
+using ETS2LA.Settings;
 using static ETS2LA.Translations.T;
 
 using Spectre.Console;
@@ -42,6 +43,14 @@ namespace ETS2LA.Backend
                 PluginHandler = new PluginHandler();
                 PluginHandler.LoadLibraries();
                 PluginHandler.LoadPlugins();
+                if (PersonalDrivingProfile.IsEnabled)
+                {
+                    foreach (string id in new[] { "tumppi066.pathfinding", "tumppi066.laneassist", "tumppi066.adaptivecruisecontrol", "tumppi066.visualizationsockets" })
+                    {
+                        var plugin = PluginHandler.LoadedPlugins.FirstOrDefault(p => p.Info.Id == id);
+                        if (plugin != null && !plugin._IsRunning) PluginHandler.EnablePlugin(plugin);
+                    }
+                }
                 Thread.Sleep(1000);
 
                 Logger.Success(_("ETS2LA is running."));

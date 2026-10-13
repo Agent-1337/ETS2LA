@@ -48,23 +48,11 @@
     </PropertyGroup>
   </Target>
 
-  <Target Name="CopyAssets" AfterTargets="Build">
-    <ItemGroup>
-      <AssetFiles Include="$(MSBuildThisFileDirectory)..\Assets\**\*.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(OutputPath)Assets\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
-  </Target>
-
-  <Target Name="CopyLibdeflate" AfterTargets="Build">
-    <Copy SourceFiles="..\ETS2LA.Game\libs\libdeflate.dll" DestinationFolder="$(OutputPath)" />
-  </Target>
-
-  <Target Name="CopyWwwroot" AfterTargets="Build">
-    <ItemGroup>
-      <AssetFiles Include="$(MSBuildThisFileDirectory)..\ETS2LA.UI\wwwroot\**\*.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(AssetFiles)" DestinationFiles="@(AssetFiles->'$(OutputPath)wwwroot\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
-  </Target>
+  <ItemGroup>
+    <Content Include="..\Assets\**\*" Link="Assets\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\ETS2LA.Game\libs\libdeflate.dll" Link="libdeflate.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\ETS2LA.UI\wwwroot\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>

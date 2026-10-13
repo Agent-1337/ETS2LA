@@ -154,23 +154,6 @@
         }
     }
 
-    private bool StayOnTop
-    {
-        get => WindowSettings.Current.StayOnTop;
-        set
-        {
-            if (value != StayOnTop)
-            {
-                WindowSettings.Current.StayOnTop = value;
-                WindowSettings.Current.Save();
-                UserInterfaceUtils.AskForRestart(
-                    _("Restart Required"),
-                    _("Changing this option requires a restart of ETS2LA to take effect. Restart now?")
-                );
-            }
-        }
-    }
-
     private void OnDisplayUnitChanged(int index)
     {
         var settings = StateSettingsHandler.Current.GetSettings();
@@ -248,11 +231,6 @@
             Value="@WindowSettings.Current.Zoom"
             ValueChanged="@((float value) => HandleZoomChanged(value))" 
             ValueSubmitted="@(() => HandleZoomSubmitted())" />
-    <Switch Title=@(_("Stay on Top"))
-            Description=@(_("Keep the ETS2LA window on top of other windows. If you want to use the visualization on a single monitor setup, this is recommended."))
-            Value="@StayOnTop"
-            ValueChanged="@((bool value) => StayOnTop = value)" />
-
     <SectionTitle Class="mt-8" Title=@(_("Overlay")) />
     <Switch Title=@(_("Disable Overlay"))
             Description=@(_("Disables the overlay entirely. This will fix the black screen issue at the cost of breaking all features that rely on the overlay, including AR and the HUD."))

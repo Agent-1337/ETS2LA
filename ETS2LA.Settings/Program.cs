@@ -52,7 +52,17 @@ namespace ETS2LA.Settings
         public bool Save<T>(string fileName, T data)
         {
             VerifyJsonPath(fileName);
-            string json = JsonSerializer.Serialize(data, _jsonOpts);
+            string json = PersonalDrivingProfile.ApplyIfEnabled(fileName, JsonSerializer.Serialize(data, _jsonOpts));
+            if (PersonalDrivingProfile.IsEnabled && PersonalDrivingProfile.HasOverrides(fileName))
+            {
+                // Settings pages save immediately; keep their live object consistent with the fixed profile too.
+                var effective = JsonSerializer.Deserialize<T>(json, _jsonOpts)!;
+                foreach (var field in typeof(T).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    if (!field.IsInitOnly) field.SetValue(data, field.GetValue(effective));
+                foreach (var property in typeof(T).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    if (property.SetMethod?.IsPublic == true && property.GetIndexParameters().Length == 0)
+                        property.SetValue(data, property.GetValue(effective));
+            }
 
             Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(_baseDir, fileName))!);
             string target = Path.Combine(_baseDir, fileName);
@@ -103,19 +113,21 @@ namespace ETS2LA.Settings
             {
                 T created = Activator.CreateInstance<T>();
                 Save(fileName, created);
-                return created;
+                return JsonSerializer.Deserialize<T>(PersonalDrivingProfile.ApplyIfEnabled(fileName,
+                    JsonSerializer.Serialize(created, _jsonOpts)), _jsonOpts)!;
             }
 
             string json = File.ReadAllText(path, Encoding.UTF8);
             try
             {
-                var data = JsonSerializer.Deserialize<T>(json, _jsonOpts);
+                var data = JsonSerializer.Deserialize<T>(PersonalDrivingProfile.ApplyIfEnabled(fileName, json), _jsonOpts);
                 return data != null ? data : default!;
             }
             catch (JsonException)
             {
                 Console.WriteLine($"Failed to deserialize settings file {fileName}, returning default instance.");
-                return Activator.CreateInstance<T>();
+                return JsonSerializer.Deserialize<T>(PersonalDrivingProfile.ApplyIfEnabled(fileName,
+                    JsonSerializer.Serialize(Activator.CreateInstance<T>(), _jsonOpts)), _jsonOpts)!;
             }
         }
 
@@ -192,7 +204,7 @@ namespace ETS2LA.Settings
 
                     try
                     {
-                        var obj = JsonSerializer.Deserialize(json, entry.DataType, _jsonOpts);
+                        var obj = JsonSerializer.Deserialize(PersonalDrivingProfile.ApplyIfEnabled(name, json), entry.DataType, _jsonOpts);
                         entry.Callback.DynamicInvoke(obj);
                     }
                     catch

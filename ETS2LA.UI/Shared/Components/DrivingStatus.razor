@@ -1,0 +1,29 @@
+@using ETS2LA.State
+@implements IDisposable
+
+<div class="flex flex-col gap-1" role="status" aria-live="polite" aria-atomic="true">
+    <p class="font-semibold">@_("Full Self-Driving")</p>
+    <p class="@(ApplicationState.Current.EnableAssists ? "text-success" : "text-text-l")">
+        @(ApplicationState.Current.EnableAssists ? _("Enabled") : _("Disabled"))
+    </p>
+    @if (ApplicationState.Current.EnableAssists && !string.IsNullOrEmpty(ApplicationState.Current.DrivingSafetyReason))
+    {
+        <p class="description">@ApplicationState.Current.DrivingSafetyReason</p>
+    }
+</div>
+
+@code {
+    private bool disposed;
+    protected override void OnInitialized() => ApplicationState.Current.DrivingStatusChanged += OnStatusChanged;
+
+    private void OnStatusChanged(object? sender, EventArgs args)
+    {
+        if (!disposed) InvokeAsync(() => { if (!disposed) StateHasChanged(); });
+    }
+
+    public void Dispose()
+    {
+        disposed = true;
+        ApplicationState.Current.DrivingStatusChanged -= OnStatusChanged;
+    }
+}

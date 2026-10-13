@@ -4,6 +4,7 @@ using static ETS2LA.Translations.T;
 
 using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
+using ETS2LA.Game.Telemetry;
 
 namespace ETS2LA.Game.Output;
 
@@ -14,6 +15,10 @@ public class GameOutput
     public string EventString = "ETS2LA.Game.Output.ControlEvent";
 
     public Dictionary<string, ControlChannel> Channels = new Dictionary<string, ControlChannel>();
+    private readonly object channelLock = new();
+    private readonly DrivingPlanGuard planGuard = new();
+    private volatile bool assistsEnabled;
+    private string safetyStatus = "";
 
     // Example:
     // "steering" : [(0.5, 1.0), (0.2, 0.5)]
@@ -68,6 +73,8 @@ public class GameOutput
         TryOpenMemory();
         // Then we start listening to events and spin up the update thread.
         Events.Current.Subscribe<ControlEvent>(EventString, OnControlEvent);
+        Events.Current.Subscribe<bool>("ETS2LA.State.AssistsEnabled", enabled => assistsEnabled = enabled);
+        Events.Current.Subscribe<object>("Pathfinding.PlannedPathData", planGuard.Update);
         Task.Factory.StartNew(Tick, TaskCreationOptions.LongRunning);
     }
 
@@ -91,7 +98,7 @@ public class GameOutput
             # endif
             legacyAccessor = legacyMmf.CreateViewAccessor(0, legacyMapSize, MemoryMappedFileAccess.Write);
             modernAccessor = modernMmf.CreateViewAccessor(0, modernMapSize, MemoryMappedFileAccess.ReadWrite);
-        } 
+        }
         catch
         {
             // Logging.Logger.Error("Failed to open memory: " + ex.Message);
@@ -106,7 +113,14 @@ public class GameOutput
 
     public void OnControlEvent(ControlEvent controlEvent)
     {
+        lock (channelLock)
+        {
         string channel = controlEvent.ChannelDefinition.Id;
+        if (controlEvent.Variables == null || controlEvent.Properties == null)
+        {
+            Channels.Remove(channel);
+            return;
+        }
         if (!Channels.ContainsKey(channel))
         {
             Channels[channel] = new ControlChannel{
@@ -126,16 +140,17 @@ public class GameOutput
             Channels[channel].LastUpdate.Restart();
             Channels[channel].BoolsProcessed = false;
         }
+        }
     }
 
     private void ResetOutputs()
-    {        
+    {
         if (!MemoryAccessAvailable)
             return;
 
         if (IsReset)
             return;
-        
+
         if (legacyAccessor != null)
         {
             foreach (var field in typeof(ControlVariables).GetFields())
@@ -160,7 +175,7 @@ public class GameOutput
             WriteFloat(modernAccessor, 13, 0);
             WriteBool(modernAccessor, 17, false);
             WriteDouble(modernAccessor, 18, 0);
-            
+
             modernAccessor.Flush();
         }
 
@@ -194,10 +209,17 @@ public class GameOutput
     {
         var boolType = channel.Properties.BooleanType;
         var weight = channel.Properties.Weight;
+        float? pedals = ControlMixer.Pedals(channel.Variables);
+        if (pedals != null)
+        {
+            if (!curFrameFloats.ContainsKey("acceleration")) curFrameFloats["acceleration"] = new();
+            curFrameFloats["acceleration"].Add(new Tuple<float, float>(weight, pedals.Value));
+        }
 
         foreach (var prop in typeof(ControlVariables).GetFields())
         {
             var value = prop.GetValue(channel.Variables);
+            if (prop.Name is "aforward" or "abackward") continue;
             if (value != null)
             {
                 if (prop.FieldType == typeof(bool?) && !channel.BoolsProcessed)
@@ -249,87 +271,131 @@ public class GameOutput
             if (!MemoryAccessAvailable || legacyAccessor == null || modernAccessor == null)
             {
                 TryOpenMemory();
+                SetSafetyStatus(assistsEnabled ? _("Waiting for the game SDK") : "");
                 tickTimer.Restart();
                 continue;
             }
 
-            if(Channels.Count == 0)
+            var telemetry = GameTelemetry.Current.GetCurrentData();
+            if (!telemetry.sdkActive || telemetry.paused)
             {
-                if (!IsReset)
-                    ResetOutputs();
-                
+                ResetOutputs();
+                SetSafetyStatus(assistsEnabled ? _("Waiting for the game SDK") : "");
                 tickTimer.Restart();
                 continue;
             }
 
             IsReset = false;
-            try
+            CollectControls();
+
+            // Clear pedals and steering every frame that lacks a fresh request.
+            // Legacy pedal values have no timestamp watchdog in the game.
+            curFrameFloats.TryAdd("acceleration", new());
+            curFrameFloats.TryAdd("steering", new());
+            if (!assistsEnabled)
             {
-                foreach (var channel in Channels.Values)
-                {
-                    if (channel.Properties == null || channel.Variables == null)
-                        continue;
-
-                    if (channel.LastUpdate.Elapsed.TotalSeconds > channel.Definition.Timeout)
-                    {
-                        Channels.Remove(channel.Definition.Id);
-                        continue;
-                    }
-
-                    ProcessChannel(channel);
-                }
-            } catch {}
-
-            double time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-            foreach (var kvp in curFrameFloats)
-            {
-                string propName = kvp.Key;
-                List<Tuple<float, float>> values = kvp.Value;
-
-                float totalWeight = values.Sum(v => v.Item1);
-                float weightedValue = values.Sum(v => v.Item1 * v.Item2) / totalWeight;
-                weightedValue = Math.Clamp(weightedValue, -1f, 1f);
-
-                if(propName == "steering")
-                {
-                    WriteFloat(modernAccessor, 0, weightedValue);
-                    WriteBool(modernAccessor, 4, weightedValue != 0.0f);
-                    WriteDouble(modernAccessor, 5, time);
-                }
-                else if (propName == "acceleration")
-                {
-                    if (GameSettings.Current.EnableModernOutputForPedals) 
-                    {
-                        WriteFloat(modernAccessor, 13, weightedValue);
-                        WriteBool(modernAccessor, 17, weightedValue != 0.0f);
-                        WriteDouble(modernAccessor, 18, time);
-                    }
-                    else 
-                    {
-                        if (weightedValue > 0)
-                        {
-                            WriteFloat(legacyAccessor, legacyShmOffsets["aforward"], weightedValue);
-                            WriteFloat(legacyAccessor, legacyShmOffsets["abackward"], 0);
-                        }
-                        else
-                        {
-                            WriteFloat(legacyAccessor, legacyShmOffsets["abackward"], -weightedValue);
-                            WriteFloat(legacyAccessor, legacyShmOffsets["aforward"], 0);
-                        }
-                    }
-                }
-                else
-                {
-                    WriteFloat(legacyAccessor!, legacyShmOffsets[propName], weightedValue);
-                }
+                curFrameFloats["acceleration"].Clear();
+                curFrameFloats["steering"].Clear();
+                SetSafetyStatus("");
             }
+            else if (!planGuard.HasFreshPlan)
+            {
+                curFrameFloats["acceleration"].Add(new Tuple<float, float>(1, -0.65f));
+                curFrameFloats["steering"].Clear();
+                SetSafetyStatus(_("Braking: route unavailable"));
+            }
+            else SetSafetyStatus("");
 
-            modernAccessor.Flush();
-            legacyAccessor.Flush();
+            WriteFloatFrame(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
 
             curFrameFloats.Clear();
             tickTimer.Restart();
         }
 
+    }
+
+    private void CollectControls()
+    {
+        curFrameFloats.Clear();
+        try
+        {
+            lock (channelLock)
+            foreach (var channel in Channels.Values.ToArray())
+            {
+                if (channel.Properties == null || channel.Variables == null)
+                    continue;
+
+                if (channel.LastUpdate.Elapsed.TotalSeconds > channel.Definition.Timeout)
+                {
+                    Channels.Remove(channel.Definition.Id);
+                    continue;
+                }
+
+                ProcessChannel(channel);
+            }
+        } catch (Exception ex) { Logger.Error(_("Failed to process control outputs: {0}", ex.Message)); }
+    }
+
+    private void WriteFloatFrame(double time)
+    {
+        if (modernAccessor is not { } modern || legacyAccessor is not { } legacy) return;
+        curFrameFloats.TryAdd("acceleration", new());
+        curFrameFloats.TryAdd("steering", new());
+        foreach (var kvp in curFrameFloats)
+        {
+            string propName = kvp.Key;
+            List<Tuple<float, float>> values = kvp.Value;
+
+            bool hasRequest = values.Any(v => float.IsFinite(v.Item1) && v.Item1 > 0 && float.IsFinite(v.Item2));
+            float weightedValue = ControlMixer.Resolve(values, brakePriority: propName == "acceleration");
+
+            if(propName == "steering")
+            {
+                WriteFloat(modern, 0, weightedValue);
+                WriteBool(modern, 4, hasRequest);
+                WriteDouble(modern, 5, time);
+            }
+            else if (propName == "acceleration")
+            {
+                if (GameSettings.Current.EnableModernOutputForPedals)
+                {
+                    WriteFloat(legacy, legacyShmOffsets["aforward"], 0);
+                    WriteFloat(legacy, legacyShmOffsets["abackward"], 0);
+                    WriteFloat(modern, 13, weightedValue);
+                    WriteBool(modern, 17, hasRequest);
+                    WriteDouble(modern, 18, time);
+                }
+                else
+                {
+                    WriteFloat(modern, 13, 0);
+                    WriteBool(modern, 17, false);
+                    if (weightedValue > 0)
+                    {
+                        WriteFloat(legacy, legacyShmOffsets["aforward"], weightedValue);
+                        WriteFloat(legacy, legacyShmOffsets["abackward"], 0);
+                    }
+                    else
+                    {
+                        WriteFloat(legacy, legacyShmOffsets["abackward"], -weightedValue);
+                        WriteFloat(legacy, legacyShmOffsets["aforward"], 0);
+                    }
+                }
+            }
+            else
+            {
+                WriteFloat(legacy, legacyShmOffsets[propName], weightedValue);
+            }
+        }
+
+        modern.Flush();
+        legacy.Flush();
+
+    }
+
+    private void SetSafetyStatus(string status)
+    {
+        if (safetyStatus == status) return;
+        safetyStatus = status;
+        Events.Current.Publish("ETS2LA.Game.Output.SafetyStatus", status);
     }
 }

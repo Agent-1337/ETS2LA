@@ -35,9 +35,9 @@
     </ProjectReference>
   </ItemGroup>
 
-  <Target Name="BuildTailwind" BeforeTargets="Build">
-    <Exec Command="bun install" />
-    <Exec Command="bun run build:css" />
+  <Target Name="BuildTailwind" BeforeTargets="PrepareForBuild">
+    <Exec Command="bun install --frozen-lockfile" WorkingDirectory="$(MSBuildThisFileDirectory)" />
+    <Exec Command="bun run build:css" WorkingDirectory="$(MSBuildThisFileDirectory)" />
     <Message Text="Tailwind CSS build completed." Importance="high" />
   </Target>
 

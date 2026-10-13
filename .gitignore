@@ -2,6 +2,10 @@
 **/bin
 **/obj
 publish
+publish.previous
+.tools/
+.build/
+**/node_modules/
 Releases
 .idea
 .vs

@@ -1,73 +1,80 @@
 @using ETS2LA.UI.Shared.Overlays
 @using ETS2LA.UI.Shared.Components
-@using ETS2LA.Logging;
-@using ETS2LA.Networking.Settings;
-
+@using ETS2LA.Networking.Settings
+@using Microsoft.AspNetCore.Components.Routing
+@inject NavigationManager Navigation
 @inherits LayoutComponentBase
+@implements IDisposable
 
 @code {
-  string currentVersion = "v" + System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
-
-  protected override void OnInitialized()
-  {
-    base.OnInitialized();
-    WindowState.Current.NeedsFullReload += (sender, e) => {
-        InvokeAsync(StateHasChanged); 
-    };
-  }
+    private string currentVersion = "v" + (System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown");
+    private bool IsVisualization => new Uri(Navigation.Uri).AbsolutePath.TrimEnd('/').EndsWith("/visualization", StringComparison.OrdinalIgnoreCase);
+    protected override void OnInitialized()
+    {
+        WindowState.Current.NeedsFullReload += OnLayoutChanged;
+        Navigation.LocationChanged += OnLocationChanged;
+    }
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs args) => InvokeAsync(StateHasChanged);
+    private void OnLayoutChanged(object? sender, EventArgs args) => InvokeAsync(StateHasChanged);
+    private void ToggleSidebar()
+    {
+        WindowState.Current.IsSidebarOpen = !WindowState.Current.IsSidebarOpen;
+        WindowState.Current.RequestFullReload();
+    }
+    public void Dispose()
+    {
+        WindowState.Current.NeedsFullReload -= OnLayoutChanged;
+        Navigation.LocationChanged -= OnLocationChanged;
+    }
 }
 
-<main class="flex h-screen w-screen flex-col border border-border rounded-md bg-bg">
-  <ResizeHandles />
-  <Titlebar />
-  <Notifications />
-    
-  <div class="flex p-1.5 h-full w-full">
-    <!-- Sidebar -->
-    <div class=@((WindowState.Current.IsSidebarOpen ? "w-[210px]" : "w-0") + " transition-all duration-300 ease-in-out pl-1 pr-3 pt-2.5 flex gap-6.5 flex-col h-full")>
-      <div class="flex pl-3 flex-col relative">
-        <div class=@((WindowState.Current.IsSidebarOpen ? " opacity-100" : " opacity-0") + " transition-opacity duration-100 ease-in-out")>
-          <div class="flex items-end gap-0.5">
-            <p class="font-bold">ETS2LA</p>
-            <p class="text-[12px] mb-px"></p>
-          </div>
-          <p class="description text-[11px] font-medium -my-0.5">@currentVersion</p>
+<main class="flex h-screen w-screen flex-col overflow-hidden border border-border rounded-md bg-bg">
+    <ResizeHandles />
+    <Titlebar />
+    <Notifications />
+
+    <div class="relative flex flex-1 min-h-0 w-full p-1.5">
+        <!-- On visualization the menu overlays the canvas: toggling never resizes or reloads WebGL. -->
+        <aside class="@(WindowState.Current.IsSidebarOpen ? "w-[210px]" : "w-8") @(IsVisualization ? "absolute inset-y-1.5 left-1.5 z-40 bg-bg" : "") shrink-0 min-h-0 flex flex-col overflow-hidden">
+            <div class="flex shrink-0 justify-end pt-1 pr-1">
+                <button type="button" class="flex items-center justify-center w-7 h-7 rounded-sm hover:bg-control-bg-dark focus-visible:outline-2 focus-visible:outline-accent"
+                        aria-label="@(WindowState.Current.IsSidebarOpen ? _("Collapse sidebar") : _("Expand sidebar"))"
+                        aria-expanded="@WindowState.Current.IsSidebarOpen" aria-controls="main-sidebar" @onclick="ToggleSidebar">
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="@(WindowState.Current.IsSidebarOpen ? "M15 6l-6 6 6 6" : "M9 6l6 6-6 6")" />
+                    </svg>
+                </button>
+            </div>
+            <nav id="main-sidebar" aria-label="@_("Main menu")" hidden="@(!WindowState.Current.IsSidebarOpen)"
+                 class="flex-1 min-h-0 overflow-y-auto w-[210px] pl-4 pr-3 pb-4 flex flex-col gap-6">
+                <div>
+                    <p class="font-bold">ETS2LA</p>
+                    <p class="description">@currentVersion</p>
+                </div>
+                <DrivingStatus />
+                <div class="flex flex-col">
+                    <SidebarGroupLabel Title=@_("Main") />
+                    <SidebarButton Name=@_("Dashboard") Path="/" Match="NavLinkMatch.All" />
+                    <SidebarButton Name=@_("Visualization") Path="/visualization" />
+                </div>
+                <div class="flex flex-col">
+                    <SidebarGroupLabel Title=@_("Plugins") />
+                    <SidebarButton Name=@_("Manager") Path="/plugins/manager" />
+                    <SidebarButton Name=@_("Catalogue") Path="/plugins/catalogue" />
+                </div>
+                <div class="flex flex-col">
+                    <SidebarGroupLabel Title=@_("Help") />
+                    <SidebarButton Name=@_("Wiki / FAQ") Path="/help/wiki" />
+                    <SidebarButton Name=@_("Contact Us") Path="/help/contact" />
+                </div>
+                <div class="flex flex-col mt-auto">
+                    <SidebarButton Name=@_("Settings") Path="/settings" />
+                    <SidebarButton Name=@NetworkingSettings.Current.CurrentUser.Username Path="/settings/account" />
+                </div>
+            </nav>
+        </aside>
+        <div class="flex-1 min-w-0 min-h-0 h-full bg-bg-dark rounded-md rounded-l-lg overflow-y-auto">
+            @Body
         </div>
-
-        <div class="absolute top-0 right-0 w-6 h-6 flex items-center justify-center cursor-pointer" @onclick="() => { WindowState.Current.IsSidebarOpen = !WindowState.Current.IsSidebarOpen; WindowState.Current.RequestFullReload(); }">
-          <div class=@((WindowState.Current.IsSidebarOpen ? "w-3 h-[2px] bg-border" : "w-[2px] h-3 bg-border") + " transition-all duration-300 ease-in-out")></div>
-        </div>
-      </div>
-
-      <div class=@("flex flex-col gap-0" + (WindowState.Current.IsSidebarOpen ? " opacity-100" : " opacity-0") + " transition-opacity duration-200 ease-in-out")>
-        <SidebarGroupLabel Title=@(_("Main")) />
-        <SidebarButton Name=@(_("Dashboard")) Path="/" Match="NavLinkMatch.All" />
-        <SidebarButton Name=@(_("Visualization")) Path="/visualization" />
-      </div>
-
-      <div class=@("flex flex-col gap-0" + (WindowState.Current.IsSidebarOpen ? " opacity-100" : " opacity-0") + " transition-opacity duration-200 ease-in-out")>
-        <SidebarGroupLabel Title=@(_("Plugins")) />
-        <SidebarButton Name=@(_("Manager")) Path="/plugins/manager" />
-        <SidebarButton Name=@(_("Catalogue")) Path="/plugins/catalogue" />
-      </div>
-
-      <div class=@("flex flex-col gap-0" + (WindowState.Current.IsSidebarOpen ? " opacity-100" : " opacity-0") + " transition-opacity duration-200 ease-in-out")>
-        <SidebarGroupLabel Title=@(_("Help")) />
-        <SidebarButton Name=@(_("Wiki / FAQ")) Path="/help/wiki" />
-        <SidebarButton Name=@(_("Contact Us")) Path="/help/contact" />
-      </div>
-
-      <div class=@("w-full h-full relative" + (WindowState.Current.IsSidebarOpen ? " opacity-100" : " opacity-0") + " transition-opacity duration-200 ease-in-out")>
-        <div class="flex flex-col w-full gap-0 bottom-4 absolute">
-          <SidebarButton Name=@(_("Settings")) Path="/settings" />
-          <SidebarButton Name=@NetworkingSettings.Current.CurrentUser.Username Path="/settings/account" />
-        </div>
-      </div>
     </div>
-
-    <!-- Main Content -->
-    <div class="w-full h-full bg-bg-dark rounded-md rounded-l-lg overflow-y-auto">
-      @Body      
-    </div>
-  </div>
 </main>

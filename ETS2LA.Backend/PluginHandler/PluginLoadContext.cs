@@ -26,6 +26,14 @@ public sealed class PluginLoadContext : AssemblyLoadContext
 
     protected override Assembly? Load(AssemblyName assemblyName)
     {
+        // Host types and services must remain shared even if a plugin bundles an older host DLL.
+        if (assemblyName.Name?.StartsWith("ETS2LA.", StringComparison.OrdinalIgnoreCase) == true
+            && !string.Equals(assemblyName.Name, _mainAssemblyName, StringComparison.OrdinalIgnoreCase))
+        {
+            return AssemblyLoadContext.Default.Assemblies.FirstOrDefault(a =>
+                string.Equals(a.GetName().Name, assemblyName.Name, StringComparison.OrdinalIgnoreCase))
+                ?? AssemblyLoadContext.Default.LoadFromAssemblyName(assemblyName);
+        }
         var assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
         if (assemblyPath != null)
         {

@@ -61,10 +61,8 @@ public class SDL3ControlsBackend : IControlsBackend
             Logger.Warn(_("Failed to initialize SDL3 controls backend: {0}", ex.Message));
         }
 
-        RegisterControl(DefaultControls.Increase); // RES
-        RegisterControl(DefaultControls.Decrease); // SET
-        RegisterControl(DefaultControls.Cancel); // MODE
-        RegisterControl(DefaultControls.Next);
+        RegisterControl(DefaultControls.EnableSelfDriving);
+        RegisterControl(DefaultControls.DisableSelfDriving);
 
         UioHookProvider.Instance.KeyTypedEnabled = true;
         _keyboardHook = new EventLoopGlobalHook();
@@ -104,6 +102,8 @@ public class SDL3ControlsBackend : IControlsBackend
             instance.SaveToFile(_settingsHandler, SettingsPath);
         }
 
+        DefaultControls.ApplyBindingPolicy(instance);
+        instance.SaveToFile(_settingsHandler, SettingsPath);
         lock (_sync)
         {
             _registeredControls.Add(instance);
@@ -166,6 +166,8 @@ public class SDL3ControlsBackend : IControlsBackend
             return;
         }
 
+        if (DefaultControls.IsDrivingControl(controlId) || DefaultControls.IsReservedArrow(deviceId, controlKey))
+            return;
         control.DeviceId = deviceId;
         control.ControlId = controlKey;
         control.SaveToFile(_settingsHandler, SettingsPath);

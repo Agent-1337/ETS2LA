@@ -99,11 +99,13 @@ public class PluginHandler
             case PluginType.Plugin:
                 return InstalledPluginManifest.Current.InstalledPlugins
                     .Where(p => p.Type == PluginType.Plugin)
+                    .Where(p => File.Exists(p.DllPath))
                     .Select(p => p.DllPath)
                     .ToArray();
             case PluginType.Library:
                 return InstalledPluginManifest.Current.InstalledPlugins
                     .Where(p => p.Type == PluginType.Library)
+                    .Where(p => File.Exists(p.DllPath))
                     .Select(p => p.DllPath)
                     .ToArray();
             default:

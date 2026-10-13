@@ -53,6 +53,15 @@
 
     private void CheckForUpdates()
     {
+        if (Updater.IsLocalBuild)
+        {
+            NotificationHandler.Current.SendNotification(new ETS2LA.Notifications.Notification {
+                Id = "ETS2LA.UI.Settings.Updates.LocalBuild",
+                Title = _("Personal build"),
+                Content = _("Use start.bat to rebuild this version with your local changes.")
+            });
+            return;
+        }
         NotificationHandler.Current.SendNotification(new ETS2LA.Notifications.Notification{
             Id = "ETS2LA.UI.Settings.Updates.CheckingForUpdates",
             Title = _("Checking for updates..."),

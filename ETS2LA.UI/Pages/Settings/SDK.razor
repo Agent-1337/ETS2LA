@@ -1,105 +1,110 @@
 @page "/settings/sdk"
 @layout Shared.Layouts.SettingsLayout
-@using ETS2LA.Game;
-@using ETS2LA.Game.Data;
-@using ETS2LA.UI.Shared.Components;
+@using ETS2LA.Game
+@using ETS2LA.State
+@using ETS2LA.UI.Shared.Components
 
 @code {
-    [Parameter]
-    public bool IsOnboarding { get; set; } = false;
-    [Parameter]
-    public EventCallback OnOneSDKInstalled { get; set; }
+    [Parameter] public bool IsOnboarding { get; set; }
+    [Parameter] public EventCallback OnOneSDKInstalled { get; set; }
+    private List<Installation> Installations => GameHandler.Current.Installations;
+    private string? error;
 
-    GameHandler gameHandler = GameHandler.Current;
-
-    List<Installation> controlInstances {
-        get => gameHandler.Installations;
-    }
-
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
-        base.OnInitialized();
-        bool foundInstalled = controlInstances.Any(i => i.IsSDKInstalled(i.Version));
-        if (foundInstalled) OnOneSDKInstalled.InvokeAsync();
+        if (Installations.Any(i => i.IsSDKInstalled(i.Version))) await OnOneSDKInstalled.InvokeAsync();
     }
 
-    private void AddGameManually()
+    private void SelectGameFolder() => AddGame(UserInterface.Current.Window.ShowOpenFolder(_("Select game folder")).FirstOrDefault());
+
+    private void SelectGameExecutable()
     {
         string[] paths = UserInterface.Current.Window.ShowOpenFile(
-            _("Select core.scs"),
-            filters: new[] { ("core.scs", new[] { ".scs" }) }
-        );
-        
-        string? path = paths.FirstOrDefault();
-        if (path == null)
-            return;
-        
-        if (!File.Exists(path))
-        {
-            UserInterface.Current.Window.ShowMessage(_("Invalid file"), _("The selected file does not exist."));
-            return;
-        }
-        
-        if (!path.EndsWith("core.scs", StringComparison.OrdinalIgnoreCase))
-        {
-            UserInterface.Current.Window.ShowMessage(_("Invalid file"), _("The selected file is not a core.scs file."));
-            return;
-        }
+            _("Select eurotrucks2.exe or amtrucks.exe"),
+            filters: new[] { (_("Game executable"), new[] { ".exe" }), ("core.scs", new[] { ".scs" }) });
+        AddGame(paths.FirstOrDefault());
+    }
 
-        string installDir = Path.GetDirectoryName(path) ?? "";
-        if (!Directory.Exists(installDir))
+    private void AddGame(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return; // Cancel leaves the list unchanged.
+        error = null;
+        try
         {
-            UserInterface.Current.Window.ShowMessage(_("Invalid directory"), _("The selected directory does not exist."));
+            if (GameHandler.Current.AddManualInstallation(path) == null)
+                error = _("Select the game folder containing core.scs, or eurotrucks2.exe / amtrucks.exe inside bin/win_x64.");
+        }
+        catch (Exception ex)
+        {
+            error = _("Could not add the game: {0}", ex.Message);
+        }
+    }
+
+    private async Task InstallSdk(Installation installation)
+    {
+        error = null;
+        if (ApplicationState.Current.IsGameRunning)
+        {
+            error = _("Close the game before installing or removing its SDKs.");
             return;
         }
+        // Advance onboarding only after the SDK was actually copied successfully.
+        if (installation.InstallSDK(installation.Version)) await OnOneSDKInstalled.InvokeAsync();
+        else error = _("SDK installation failed. Check the game folder permissions and the logs, then try again.");
+    }
 
-        if (GameHandler.Current.AddManualInstallation(installDir) != null)
+    private void UninstallSdk(Installation installation)
+    {
+        error = null;
+        if (ApplicationState.Current.IsGameRunning)
         {
-            UserInterface.Current.Window.ShowMessage(_("Game added"), _("The game has been added successfully."));
+            error = _("Close the game before installing or removing its SDKs.");
+            return;
         }
-        else
-        {
-            UserInterface.Current.Window.ShowMessage(_("Failed to add game"), _("Please see the logs for more information."));
-        }
+        if (!installation.UninstallSDK(installation.Version))
+            error = _("SDK removal failed. Check the game folder permissions and the logs, then try again.");
     }
 }
 
-<div class="flex flex-col ml-8 m-5 gap-24">
-    @if (controlInstances.Count > 0)
-    {
-        <div class="grid grid-cols-[repeat(auto-fill,minmax(27rem,1fr))] gap-4 py-2 px-3">
-            @for(int i = 0; i < controlInstances.Count; i++)
-            {
-                var instance = controlInstances[i];
-                var installed = instance.IsSDKInstalled(instance.Version);
-
-                <div class="flex flex-col justify-between rounded-sm bg-control-bg-dark border p-4 gap-3 border-bg-darker">
-                    <div class="flex flex-col gap-1">
-                        <p>@(UserInterfaceUtils.ClassnameWithSpaces(@instance.Type.ToString()) + "  -  " + instance.Version.ToString())</p>
-                        @if (!IsOnboarding)
-                        {
-                            <p class="description">@(installed ? _("SDKs are currently installed.") : _("SDKs need to be installed.")) @(_("This game was found at")) @instance.Path</p>
-                        }
-                        else
-                        {
-                            <p class="description">@instance.Path</p>
-                        }
-                    </div>
-
-                    <button class="@(installed ? "hidden" : "button button-accent w-full!")" @onclick="@(() => { OnOneSDKInstalled.InvokeAsync(); instance.InstallSDK(instance.Version); })">@((_("Install SDKs")))</button>
-                    <button class="@(installed ? "button w-full!" : "hidden")" @onclick="@(() => instance.UninstallSDK(instance.Version))">@((_("Uninstall SDKs")))</button>
-                </div>
-            }
+<div class="flex flex-col min-w-0 p-5 gap-5">
+    <div class="flex flex-col gap-2">
+        <SectionTitle Title=@_("Game installations") />
+        <p class="description">@_("Select a game folder or its executable if Steam does not list it. The location is remembered for SDK installation and map loading.")</p>
+        <div class="flex flex-wrap gap-2">
+            <button class="button" @onclick="SelectGameFolder">@_("Choose game folder")</button>
+            <button class="button" @onclick="SelectGameExecutable">@_("Choose game executable")</button>
         </div>
-    }
-    
-    @if ((IsOnboarding && controlInstances.Count == 0) || !IsOnboarding)
+        @if (error != null)
+        {
+            <p role="alert" class="text-danger break-words">@error</p>
+        }
+    </div>
+
+    @if (Installations.Count == 0)
     {
-        <div class=@(IsOnboarding ? " justify-self-center" : " h-full")>
-            <div class=@($"flex flex-col gap-4 w-108" + (IsOnboarding ? "" : " absolute bottom-6"))>
-                <p class="description text-warning">@((_("Cracked games or demos will block our SDK from loading. They do not work, and we don't intend to fix this.")))</p>
-                <button class="button w-full!" @onclick="AddGameManually">@((_("Add Game Manually")))</button>
+        <p class="description">@_("No game installations found. Choose your Euro Truck Simulator 2 or American Truck Simulator folder above.")</p>
+    }
+    @foreach (var installation in Installations)
+    {
+        var installed = installation.IsSDKInstalled(installation.Version);
+        <div @key="installation.Path" class="flex flex-col min-w-0 gap-3 p-4 rounded-sm bg-control-bg-dark border border-bg-darker">
+            <div class="flex flex-wrap justify-between gap-2">
+                <p class="font-semibold">@(installation.Type == GameType.EuroTruckSimulator2 ? "Euro Truck Simulator 2" : "American Truck Simulator") · @installation.Version</p>
+                <p class="description">@(installation.IsManuallyAdded ? _("Added manually") : _("Found through Steam"))</p>
             </div>
+            <p class="description break-all">@installation.Path</p>
+            <p class="description break-all">@_("Executable: {0}", installation.ExecutablePath)</p>
+            <p class="description break-all">@_("SDK folder: {0}", installation.SDKDirectory)</p>
+            <p class="@(installed ? "text-success" : "text-text-l")">@(installed ? _("SDKs installed") : _("SDKs not installed"))</p>
+            @if (!installed && !installation.HasBundledSDK(installation.Version))
+            {
+                <p class="text-warning">@_("No SDK is bundled for game version {0}. Update the game to a supported version before installing SDKs.", installation.Version)</p>
+            }
+            <button class="@(installed ? "button" : "button button-accent")"
+                    disabled="@(!installed && !installation.HasBundledSDK(installation.Version))"
+                    @onclick="async () => { if (installed) UninstallSdk(installation); else await InstallSdk(installation); }">
+                @(installed ? _("Uninstall SDKs") : _("Install SDKs"))
+            </button>
         </div>
     }
 </div>

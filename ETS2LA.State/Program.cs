@@ -3,6 +3,7 @@ using ETS2LA.Controls.Defaults;
 using ETS2LA.Backend.Events;
 using ETS2LA.Game.Telemetry;
 using ETS2LA.Settings.Global;
+using ETS2LA.Settings;
 using ETS2LA.Game;
 using ETS2LA.Game.SiiFiles;
 using ETS2LA.Game.PpdFiles;
@@ -32,13 +33,17 @@ public class ApplicationState
 
     public ApplicationState()
     {
-
+        assistanceSettings = AssistanceSettings.Current;
+        HandleSettingsChanged(StateSettingsHandler.Current.GetSettings());
         Events.Current.Subscribe<GameTelemetryData>(GameTelemetry.Current.EventString, HandleTelemetryUpdate);
         Events.Current.Subscribe<float>("TelemetryEvents.SpeedLimitChanged", HandleSpeedLimitChanged);
 
-        ControlsBackend.Current.On(DefaultControls.Cancel.Id, HandleCancel);
-        ControlsBackend.Current.On(DefaultControls.Increase.Id, HandleIncrease);
-        ControlsBackend.Current.On(DefaultControls.Decrease.Id, HandleDecrease);
+        ControlsBackend.Current.On(DefaultControls.EnableSelfDriving.Id, HandleEnableSelfDriving);
+        ControlsBackend.Current.On(DefaultControls.DisableSelfDriving.Id, HandleDisableSelfDriving);
+        Events.Current.Subscribe<string>("ETS2LA.Game.Output.SafetyStatus", reason => {
+            DrivingSafetyReason = reason;
+            DrivingStatusChanged?.Invoke(this, EventArgs.Empty);
+        });
 
         assistanceSettings = AssistanceSettings.Current;
 
@@ -57,6 +62,7 @@ public class ApplicationState
         latestTelemetryData = data;
         if (data.sdkActive)
         {
+            UpdateSpeedTarget(data.truckFloat.speedLimit);
             IsGameRunning = true;
             RunningGameType = data.scsValues.game == "ETS2" ? GameType.EuroTruckSimulator2
                                                             : GameType.AmericanTruckSimulator;
@@ -79,6 +85,7 @@ public class ApplicationState
         }
         else
         {
+            if (IsGameRunning) { EnableAssists = false; lastSpeedLimit = 0; DesiredSpeed = 0; }
             IsGameRunning = false;
         }
     }
@@ -99,20 +106,31 @@ public class ApplicationState
 
 
     /// <summary>
-    ///  Defines the level of driving assistance the user wants.
+    ///  Full Self-Driving is the sole mode. Keep the setter and enum values for plugin compatibility.
     /// </summary>
-    public DrivingMode DrivingMode { get; set; } = DrivingMode.FullSelfDriving;
+    public DrivingMode DrivingMode { get => DrivingMode.FullSelfDriving; set { } }
     public Dictionary<DrivingMode, string> DrivingModeTranslation = new Dictionary<DrivingMode, string>
     {
-        { DrivingMode.AdaptiveCruiseControlOnly, _("Adaptive Cruise Control Only") },
-        { DrivingMode.FullSelfDriving, _("Full Self-Driving") },
-        { DrivingMode.LaneAssistOnly, _("Lane Assist Only") }
+        { DrivingMode.FullSelfDriving, _("Full Self-Driving") }
     };
 
     /// <summary>
     ///  This value will determine whether assists are enabled or not.
     /// </summary>
-    public bool EnableAssists { get; set; } = false;
+    private volatile bool enableAssists;
+    public string DrivingSafetyReason { get; private set; } = "";
+    public event EventHandler? DrivingStatusChanged;
+    public bool EnableAssists
+    {
+        get => enableAssists;
+        set
+        {
+            if (enableAssists == value) return;
+            enableAssists = value;
+            Events.Current.Publish("ETS2LA.State.AssistsEnabled", value);
+            DrivingStatusChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
 
     /// <summary>
     ///  This value will be used by the longitudinal assist to determine the target speed. This value does
@@ -147,198 +165,54 @@ public class ApplicationState
     // If determining what they do is hard via code, then take a look at the 
     // example at https://docs.ets2la.com/docs/Rewrite/UserInput#how-to-listen-to-registered-controls
 
-    private void RoundToNearestUnit()
+    public static float SpeedTargetForLimit(float speedLimit) => speedLimit + PersonalDrivingProfile.SpeedOffsetMetresPerSecond;
+
+    private void UpdateSpeedTarget(float newSpeedLimit)
     {
-        switch (DisplayUnits)
-        {
-            case Units.Metric:
-                DesiredSpeed = (float)(Math.Round(DesiredSpeed * 3.6) / 3.6); // Round to nearest km/h
-                break;
-            case Units.Imperial:
-                DesiredSpeed = (float)(Math.Round(DesiredSpeed * 2.237) / 2.237); // Round to nearest mph
-                break;
-            case Units.Scientific:
-                DesiredSpeed = (float)Math.Round(DesiredSpeed); // Round to nearest m/s
-                break;
-        }
-
-        if (DesiredSpeed < 0)
-            DesiredSpeed = 0;
-    }
-
-    private void ApplyLimits()
-    {
-        float maxSpeed = AssistanceSettings.Current.MaximumSpeed;
-        if (DesiredSpeed > maxSpeed && maxSpeed > 0)
-            DesiredSpeed = maxSpeed;
-        if (DesiredSpeed < 0)
-            DesiredSpeed = 0;
-    }
-
-    private float SnapTo10s(float increase)
-    {
-        if (!stateSettings.SnapTo10s)
-            return DesiredSpeed + increase;
-
-        float currentSpeedInDisplayUnits = UnitConversions.FromScientificUnits(UnitType.Speed, DesiredSpeed, DisplayUnits);
-        float newSpeedInDisplayUnits = currentSpeedInDisplayUnits + UnitConversions.FromScientificUnits(UnitType.Speed, increase, DisplayUnits);
-        // When increasing by 2 from 37 we go:
-        // 37 -> 39 -> 40 -> 42 -> 44
-        float currentSpeed10s = (float)(Math.Floor((currentSpeedInDisplayUnits + 0.1f) / 10) * 10);
-        float newSpeed10s = (float)(Math.Floor((newSpeedInDisplayUnits + 0.1f) / 10) * 10);
-        
-        if (currentSpeed10s != newSpeed10s && newSpeed10s > currentSpeed10s)
-        {
-            return UnitConversions.ToScientificUnits(UnitType.Speed, newSpeed10s, DisplayUnits);
-        }
-        else
-        {
-            return DesiredSpeed + increase;
-        }
+        if (float.IsFinite(newSpeedLimit) && newSpeedLimit > 0) lastSpeedLimit = newSpeedLimit;
+        float limit = lastSpeedLimit > 0 ? lastSpeedLimit : stateSettings.FallbackSpeed;
+        DesiredSpeed = SpeedTargetForLimit(limit);
     }
 
     private void HandleSpeedLimitChanged(float newSpeedLimit)
     {
-        if (!AssistanceSettings.Current.EnabledTrafficRules.Contains(TrafficRule.Speedlimits))
-            return;
-        
-        if (DesiredSpeed == 0)
-            return;
-
-        newSpeedLimit = Math.Max(newSpeedLimit, 0);
-        newSpeedLimit += newSpeedLimit * stateSettings.DesiredSpeedPercentageOffset / 100;
-        newSpeedLimit += stateSettings.DesiredSpeedStaticOffset;
-
-        float offset = 0;
-        if (lastSpeedLimit != 0)
-            offset = DesiredSpeed - lastSpeedLimit; 
-
-        if (newSpeedLimit == 0)
-            newSpeedLimit = stateSettings.FallbackSpeed;
-
-        bool wasBelowLimit = lastSpeedLimit < AssistanceSettings.Current.MaximumSpeed;
-        lastSpeedLimit = newSpeedLimit;
-        DesiredSpeed = newSpeedLimit + (wasBelowLimit ? offset : 0);
-        RoundToNearestUnit();
-        ApplyLimits();
+        UpdateSpeedTarget(newSpeedLimit);
+        if (!EnableAssists) return;
         NotificationHandler.Current.SendNotification(new Notification
         {
             Id = "ApplicationState.SpeedLimitChanged",
             Title = _("Speed limit changed"),
-            Content = _("New limit {0} {1}", (int)Math.Round(UnitConversions.FromScientificUnits(UnitType.Speed, newSpeedLimit, DisplayUnits), 0), UnitConversions.GetUnitAbbreviation(UnitType.Speed, DisplayUnits))
+            Content = _("Target: {0} {1}", (int)Math.Round(UnitConversions.FromScientificUnits(UnitType.Speed, DesiredSpeed, DisplayUnits), 0), UnitConversions.GetUnitAbbreviation(UnitType.Speed, DisplayUnits))
         });
     }
 
-    private void HandleCancel(object sender, ControlChangeEventArgs e)
+    private void HandleEnableSelfDriving(object? sender, ControlChangeEventArgs e)
     {
-        bool b = (bool)e.NewValue;
-        if(b == true) return; // key down event
-
-        if (EnableAssists) 
-        {
-            EnableAssists = false;
-        }
-        else
-        {
-            DrivingMode += 1;
-            if (DrivingMode > DrivingMode.LaneAssistOnly)
-                DrivingMode = DrivingMode.AdaptiveCruiseControlOnly;
-            
-            NotificationHandler.Current.SendNotification(new Notification
-            {
-                Id = "ApplicationState.DrivingModeChanged",
-                Title = DrivingModeTranslation[DrivingMode],
-                Content = _("Driving mode changed, press Cancel/MODE again to cycle through the modes.")
-            });
-        }
+        if (e.NewValue is true) SetSelfDrivingEnabled(true);
     }
 
-    private void HandleIncrease(object sender, ControlChangeEventArgs e)
+    private void HandleDisableSelfDriving(object? sender, ControlChangeEventArgs e)
     {
-        bool b = (bool)e.NewValue;
-        if(b == true) return; // key down event
-
-        // RES
-        if (!EnableAssists)
-        {
-            // SET if speed too low compared to current speed
-            // to avoid an "AEB" like event.
-            if (latestTelemetryData.truckFloat.speed > DesiredSpeed + 5 / 3.6f)
-            {
-                DesiredSpeed = latestTelemetryData.truckFloat.speed;
-            }
-            // SET if speed is 0
-            if (DesiredSpeed == 0)
-            {
-                DesiredSpeed = latestTelemetryData.truckFloat.speedLimit;
-                if (DesiredSpeed == 0) // Game is closed or we're in a menu/depot
-                {
-                    DesiredSpeed = stateSettings.FallbackSpeed;
-                }
-            }
-
-            EnableAssists = true;
-            return;
-        }
-
-        switch (DisplayUnits)
-        {
-            case Units.Metric:
-                float increaseMetric = UnitConversions.ToScientificUnits(UnitType.Speed, stateSettings.SpeedControlStepSize, Units.Metric);
-                DesiredSpeed = SnapTo10s(increaseMetric);
-                break;
-            case Units.Imperial:
-                float increaseImperial = UnitConversions.ToScientificUnits(UnitType.Speed, stateSettings.SpeedControlStepSize, Units.Imperial);
-                DesiredSpeed = SnapTo10s(increaseImperial);
-                break;
-            case Units.Scientific:
-                DesiredSpeed += stateSettings.SpeedControlStepSize;
-                break;
-        }
-
-        RoundToNearestUnit();
-        ApplyLimits();
+        if (e.NewValue is true) SetSelfDrivingEnabled(false);
     }
 
-    private void HandleDecrease(object sender, ControlChangeEventArgs e)
+    public void SetSelfDrivingEnabled(bool enabled)
     {
-        bool b = (bool)e.NewValue;
-        if(b == true) return; // key down event
-
-        // SET
-        if (!EnableAssists)
+        if (EnableAssists == enabled) return;
+        if (enabled)
         {
-            if (assistanceSettings.SetSpeedBehaviourOption == SetSpeedBehaviour.CurrentSpeed)
-                DesiredSpeed = latestTelemetryData.truckFloat.speed;
-            else if (assistanceSettings.SetSpeedBehaviourOption == SetSpeedBehaviour.SpeedLimit)
-                DesiredSpeed = latestTelemetryData.truckFloat.speedLimit != 0 ?
-                               latestTelemetryData.truckFloat.speedLimit :
-                               stateSettings.FallbackSpeed;
-
-            EnableAssists = true;
-            return;
+            UpdateSpeedTarget(latestTelemetryData.truckFloat.speedLimit);
         }
 
-        switch (DisplayUnits)
+        EnableAssists = enabled;
+        NotificationHandler.Current.SendNotification(new Notification
         {
-            case Units.Metric:
-                float decreaseMetric = UnitConversions.ToScientificUnits(UnitType.Speed, stateSettings.SpeedControlStepSize, Units.Metric);
-                DesiredSpeed = SnapTo10s(-decreaseMetric);
-                break;
-            case Units.Imperial:
-                float decreaseImperial = UnitConversions.ToScientificUnits(UnitType.Speed, stateSettings.SpeedControlStepSize, Units.Imperial);
-                DesiredSpeed = SnapTo10s(-decreaseImperial);
-                break;
-            case Units.Scientific:
-                DesiredSpeed -= stateSettings.SpeedControlStepSize;
-                break;
-        }
-
-        RoundToNearestUnit();
-        ApplyLimits();
+            Id = "ApplicationState.SelfDrivingStatus",
+            Title = enabled ? _("Full Self-Driving enabled") : _("Full Self-Driving disabled"),
+            Content = enabled ? _("Target speed: current limit + 5 km/h.") : _("Manual driving."),
+            CloseAfter = 3
+        });
     }
-
-
 
     // MARK: Map Data Related
 

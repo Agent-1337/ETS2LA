@@ -41,6 +41,8 @@ public class SharpDXControlsBackend : IControlsBackend
     public Dictionary<Joystick, List<JoystickUpdate>> _previousStates = new();
     private DirectInput _directInput = new DirectInput();
     private Keyboard _keyboard;
+    private readonly DrivingKeyListener drivingKeys;
+    private volatile bool shutdown;
 
     public SharpDXControlsBackend()
     {
@@ -50,11 +52,10 @@ public class SharpDXControlsBackend : IControlsBackend
 
         RefreshConnectedJoysticks();
 
+        RegisterControl(DefaultControls.EnableSelfDriving);
+        RegisterControl(DefaultControls.DisableSelfDriving);
+        drivingKeys = new DrivingKeyListener();
         Task.Factory.StartNew(ControlListener, TaskCreationOptions.LongRunning);
-        RegisterControl(DefaultControls.Increase); // RES
-        RegisterControl(DefaultControls.Decrease); // SET
-        RegisterControl(DefaultControls.Cancel); // MODE
-        RegisterControl(DefaultControls.Next);
     }
 
     private void RefreshConnectedJoysticks()
@@ -128,6 +129,8 @@ public class SharpDXControlsBackend : IControlsBackend
             instance.SaveToFile(_settingsHandler, _settingsPath);
         }
 
+        DefaultControls.ApplyBindingPolicy(instance);
+        instance.SaveToFile(_settingsHandler, _settingsPath);
         RegisteredControls.Add(instance);
         ControlAdded?.Invoke(this, new ControlAddedEventArgs(instance));
         Logger.Info(_("Registered control: {0} [gray italic]({1})[/]", definition.Name, definition.Id));
@@ -176,6 +179,8 @@ public class SharpDXControlsBackend : IControlsBackend
         var control = RegisteredControls.FirstOrDefault(c => c.Definition.Id.Equals(controlId, StringComparison.OrdinalIgnoreCase));
         if (control != null)
         {
+            if (DefaultControls.IsDrivingControl(controlId) || DefaultControls.IsReservedArrow(deviceId, controlKey))
+                return;
             control.DeviceId = deviceId;
             control.ControlId = controlKey;
             control.SaveToFile(_settingsHandler, _settingsPath);
@@ -234,6 +239,8 @@ public class SharpDXControlsBackend : IControlsBackend
 
     public void Shutdown()
     {
+        shutdown = true;
+        drivingKeys.Dispose();
         foreach (var control in RegisteredControls)
         {
             control.SaveToFile(_settingsHandler, _settingsPath);
@@ -303,11 +310,19 @@ public class SharpDXControlsBackend : IControlsBackend
     private void ControlListener()
     {
         var lastDeviceRefresh = DateTime.MinValue;
-        while (true)
+        while (!shutdown)
         {
+            while (drivingKeys.Pending.TryDequeue(out var key))
+            {
+                var definition = key.Key == "Up" ? DefaultControls.EnableSelfDriving : DefaultControls.DisableSelfDriving;
+                var control = RegisteredControls.FirstOrDefault(c => c.Definition.Id == definition.Id);
+                if (control == null) continue;
+                control.UpdateState(key.Pressed);
+                ControlValueChanged?.Invoke(this, new ControlChangeEventArgs(key.Pressed, definition));
+            }
             if (pauseListener)
             {
-                Thread.Sleep(100);
+                Thread.Sleep(10);
                 continue;
             }
 
@@ -318,12 +333,19 @@ public class SharpDXControlsBackend : IControlsBackend
                 lastDeviceRefresh = DateTime.Now;
             }
 
-            var kbBuffer = _keyboard.GetBufferedData();
+            KeyboardUpdate[] kbBuffer;
+            try { kbBuffer = _keyboard.GetBufferedData(); }
+            catch (SharpDX.SharpDXException)
+            {
+                try { _keyboard.Acquire(); } catch (SharpDX.SharpDXException) { }
+                kbBuffer = Array.Empty<KeyboardUpdate>();
+            }
             foreach (var keyEvent in kbBuffer)
             {
                 string controlId = ((Key)keyEvent.Key).ToString();
                 var matchingControls = RegisteredControls.Where(c => 
                     c.DeviceId == "Keyboard" && 
+                    (!drivingKeys.IsAvailable || !DefaultControls.IsDrivingControl(c.Definition.Id)) &&
                     c.ControlId.ToString() == controlId);
 
                 foreach (var control in matchingControls)

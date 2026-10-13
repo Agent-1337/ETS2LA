@@ -48,11 +48,19 @@ public class GameHandler
 
     private void PopulateInstallations()
     {
-        var games = SteamHandler.FindGamesInLibraries(new List<string>
+        Dictionary<string, string> games = new();
+        try
         {
-            SteamHandler.EuroTruckSimulator2AppId,
-            SteamHandler.AmericanTruckSimulatorAppId
-        });
+            games = SteamHandler.FindGamesInLibraries(new List<string>
+            {
+                SteamHandler.EuroTruckSimulator2AppId,
+                SteamHandler.AmericanTruckSimulatorAppId
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(_("Steam discovery failed; manually selected games are still available: {0}", ex.Message));
+        }
 
         Logger.Info(_n("Found {0} game installation.", "Found {0} game installations.", games.Count, games.Count));
         foreach ((string appId, string gamePath) in games)
@@ -66,35 +74,17 @@ public class GameHandler
 
         foreach (string gamePath in GameSettings.Current.ManualGamePaths)
         {
-            GameType? type = DetectGameType(gamePath);
-            if (type == null)
+            if (!GameLocation.TryResolve(gamePath, out var location))
             {
                 Logger.Warn(_("Manually added game at '{0}' no longer contains a game executable, skipping.", gamePath));
                 continue;
             }
 
-            CreateInstallation(type.Value, gamePath, isManual: true);
+            CreateInstallation(location!.Type, location.RootPath, isManual: true);
         }
     }
 
-    private static string GetExecutablePath(string gamePath, GameType type)
-    {
-        return Path.Combine(
-            # if WINDOWS
-                gamePath,
-                "bin",
-                "win_x64",
-                type == GameType.EuroTruckSimulator2 ? "eurotrucks2.exe"
-                                                     : "amtrucks.exe"
-            # else
-                gamePath,
-                "bin",
-                "linux_x64",
-                type == GameType.EuroTruckSimulator2 ? "eurotrucks2"
-                                                     : "amtrucks"
-            # endif
-        );
-    }
+    private static string GetExecutablePath(string gamePath, GameType type) => GameLocation.GetExecutablePath(gamePath, type);
 
     /// <summary>Checks which game executable exists in the folder, null if neither.</summary>
     public static GameType? DetectGameType(string gamePath)
@@ -109,8 +99,9 @@ public class GameHandler
     /// <summary>Builds an installation for the folder and adds it to the list, skipping duplicates.</summary>
     private Installation CreateInstallation(GameType type, string gamePath, bool isManual)
     {
+        gamePath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gamePath));
         Installation? existing = Installations.FirstOrDefault(
-            i => Path.GetFullPath(i.Path) == Path.GetFullPath(gamePath));
+            i => string.Equals(i.Path, gamePath, GameLocation.PathComparison));
         if (existing != null)
             return existing;
 
@@ -132,7 +123,8 @@ public class GameHandler
             try
             {
                 FileVersionInfo info = FileVersionInfo.GetVersionInfo(executablePath);
-                version = info.FileVersion != null ? (info.FileVersion.Split(".")[0] + "." + info.FileVersion.Split(".")[1]) : version;
+                if (Version.TryParse(info.FileVersion, out var parsedVersion))
+                    version = $"{parsedVersion.Major}.{parsedVersion.Minor}";
             }
             catch (FileNotFoundException ex)
             {
@@ -162,22 +154,21 @@ public class GameHandler
         return installation;
     }
 
-    /// <summary>Adds a game installation from a selected folder and remembers
+    /// <summary>Adds a game installation from a selected folder or executable and remembers
     /// it for future sessions. Returns null if the folder doesn't contain a game.</summary>
     public Installation? AddManualInstallation(string gamePath)
     {
-        gamePath = Path.TrimEndingDirectorySeparator(gamePath);
-
-        GameType? type = DetectGameType(gamePath);
-        if (type == null)
+        if (!GameLocation.TryResolve(gamePath, out var location))
         {
             Logger.Warn(_("No game executable found in '{0}', not adding it as an installation.", gamePath));
             return null;
         }
 
-        Installation installation = CreateInstallation(type.Value, gamePath, isManual: true);
+        gamePath = location!.RootPath;
+        Installation installation = CreateInstallation(location.Type, gamePath, isManual: true);
 
-        if (installation.IsManuallyAdded && !GameSettings.Current.ManualGamePaths.Contains(gamePath))
+        if (installation.IsManuallyAdded && !GameSettings.Current.ManualGamePaths.Any(
+            p => string.Equals(p, gamePath, GameLocation.PathComparison)))
         {
             GameSettings.Current.ManualGamePaths.Add(gamePath);
             GameSettings.Current.Save();
@@ -196,7 +187,7 @@ public class GameHandler
         Installations = Installations.Where(i => i != installation).ToList();
 
         GameSettings.Current.ManualGamePaths.RemoveAll(
-            p => Path.GetFullPath(p) == Path.GetFullPath(installation.Path));
+            p => string.Equals(Path.GetFullPath(p), installation.Path, GameLocation.PathComparison));
         GameSettings.Current.Save();
     }
 

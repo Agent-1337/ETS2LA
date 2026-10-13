@@ -344,55 +344,35 @@ public class Installation
         GC.Collect();
     }
 
+    public string SDKDirectory => System.IO.Path.Combine(System.IO.Path.GetDirectoryName(ExecutablePath)!, "plugins");
+
+    private static string SDKSourceDirectory(string version) => System.IO.Path.Combine(
+        AppContext.BaseDirectory, "Assets", "SDKs", version, OperatingSystem.IsWindows() ? "Windows" : "Linux");
+
+    public bool HasBundledSDK(string version) => Directory.Exists(SDKSourceDirectory(version));
+
     public bool IsSDKInstalled(string version)
     {
-        string sdkPath;
-        # if WINDOWS
-            if (Type == GameType.EuroTruckSimulator2)
-                sdkPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2.exe", ""), "plugins", "ets2la_" + version);
-            else
-                sdkPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks.exe", ""), "plugins", "ets2la_" + version);
-        # else
-            if (Type == GameType.EuroTruckSimulator2)
-                sdkPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2", ""), "plugins", "ets2la_" + version);
-            else                
-                sdkPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks", ""), "plugins", "ets2la_" + version);
-        # endif
-
-        if (File.Exists(sdkPath))
-            return true;
-        else
-            return false;
+        string source = SDKSourceDirectory(version);
+        if (!Directory.Exists(source)) return false;
+        string[] files = Directory.GetFiles(source, "*", SearchOption.AllDirectories);
+        return files.Length > 0 && files.All(file => File.Exists(System.IO.Path.Combine(
+            SDKDirectory, System.IO.Path.GetRelativePath(source, file))));
     }
 
     public bool InstallSDK(string version)
     {
-        string SDKSourcePath;
-        # if WINDOWS
-            SDKSourcePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "SDKs", version, "Windows");
-        # else
-            SDKSourcePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "SDKs", version, "Linux");
-        # endif
-
-        string SDKDestinationPath;
-        # if WINDOWS
-            if (Type == GameType.EuroTruckSimulator2)
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2.exe", ""), "plugins");
-            else
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks.exe", ""), "plugins");
-        # else
-            if (Type == GameType.EuroTruckSimulator2)
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2", ""), "plugins");
-            else                
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks", ""), "plugins");
-        # endif
+        string SDKSourcePath = SDKSourceDirectory(version);
+        string SDKDestinationPath = SDKDirectory;
 
         try
         {
             Directory.CreateDirectory(SDKDestinationPath);
             foreach (string newPath in Directory.GetFiles(SDKSourcePath, "*.*", SearchOption.AllDirectories))
             {
-                File.Copy(newPath, newPath.Replace(SDKSourcePath, SDKDestinationPath), true);
+                string destination = System.IO.Path.Combine(SDKDestinationPath, System.IO.Path.GetRelativePath(SDKSourcePath, newPath));
+                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)!);
+                File.Copy(newPath, destination, true);
                 Logger.Info(_("Copied '{0}' to '{1}'", newPath, newPath.Replace(SDKSourcePath, SDKDestinationPath)));
             }
 
@@ -427,32 +407,15 @@ public class Installation
 
     public bool UninstallSDK(string version)
     {
-        string SDKSourcePath;
-        # if WINDOWS
-            SDKSourcePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "SDKs", version, "Windows");
-        # else
-            SDKSourcePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "SDKs", version, "Linux");
-        # endif
-
-        string SDKDestinationPath;
-        # if WINDOWS
-            if (Type == GameType.EuroTruckSimulator2)
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2.exe", ""), "plugins");
-            else
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks.exe", ""), "plugins");
-        # else
-            if (Type == GameType.EuroTruckSimulator2)
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("eurotrucks2", ""), "plugins");
-            else                
-                SDKDestinationPath = System.IO.Path.Combine(ExecutablePath.Replace("amtrucks", ""), "plugins");
-        # endif
+        string SDKSourcePath = SDKSourceDirectory(version);
+        string SDKDestinationPath = SDKDirectory;
 
         try
         {
             Directory.CreateDirectory(SDKDestinationPath);
             foreach (string newPath in Directory.GetFiles(SDKSourcePath, "*.*", SearchOption.AllDirectories))
             {
-                File.Delete(newPath.Replace(SDKSourcePath, SDKDestinationPath));
+                File.Delete(System.IO.Path.Combine(SDKDestinationPath, System.IO.Path.GetRelativePath(SDKSourcePath, newPath)));
                 Logger.Info(_("Deleted '{0}'", newPath.Replace(SDKSourcePath, SDKDestinationPath)));
             }
 

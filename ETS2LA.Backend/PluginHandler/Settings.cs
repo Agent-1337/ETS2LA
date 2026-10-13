@@ -47,22 +47,22 @@ public class InstalledPluginManifest
 
                 // Check if the plugins actually exist
                 int index = 0;
-                bool didRemove = false;
                 while (index < InstalledPlugins.Count)
                 {
                     var plugin = InstalledPlugins[index];
                     if (!File.Exists(plugin.DllPath))
                     {
-                        InstalledPlugins.RemoveAt(index);
-                        Logger.Warn(_("Plugin '{0}' is missing its DLL at '{1}' and has been removed.", plugin.Id ?? "Unknown", plugin.DllPath ?? "Unknown"));
-                        didRemove = true;
+                        // A portable/local build may use a different application folder.
+                        // Keep the installation record so returning to the installed app
+                        // or restoring its files does not lose the user's plugins.
+                        Logger.Warn(_("Plugin '{0}' is missing its DLL at '{1}'. Its installation record has been kept.", plugin.Id ?? "Unknown", plugin.DllPath ?? "Unknown"));
+                        index++;
                     }
                     else
                     {
                         index++;
                     }
                 }
-                if (didRemove) Save();
 
             }
             _settingsHandler.RegisterListener<InstalledPluginManifest>("InstalledPluginManifest.json", OnSettingsChanged);

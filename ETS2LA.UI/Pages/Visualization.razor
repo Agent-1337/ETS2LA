@@ -5,6 +5,8 @@
 @using ETS2LA.Backend.Events
 @using ETS2LA.Shared
 @using ETS2LA.Backend
+@using ETS2LA.UI.Shared.Components
+@implements IDisposable
 
 @code {
     private float RealPedalValue
@@ -31,10 +33,17 @@
     private bool LeftIndicator => GameTelemetry.Current.GetCurrentData().truckBool.blinkerLeftOn;
 
     private IPlugin? VisualizationSockets;
+    private Action<GameTelemetryData>? telemetryHandler;
+    private bool disposed;
+    private void OnSidebarChanged(object? sender, EventArgs args)
+    {
+        if (!disposed) InvokeAsync(StateHasChanged);
+    }
 
     protected override void OnInitialized()
     {
         base.OnInitialized();
+        WindowState.Current.NeedsFullReload += OnSidebarChanged;
 
         VisualizationSockets = PluginBackend.Current.PluginHandler?.LoadedPlugins.FirstOrDefault(p => p.Info.Id == "tumppi066.visualizationsockets");
         if (VisualizationSockets != null && VisualizationSockets._IsRunning)
@@ -42,8 +51,16 @@
             WindowState.Current.IsSidebarOpen = false;
             WindowState.Current.RequestFullReload();
 
-            Events.Current.Subscribe<GameTelemetryData>(GameTelemetry.Current.EventString, data => InvokeAsync(StateHasChanged));
+            telemetryHandler = data => { if (!disposed) InvokeAsync(() => { if (!disposed) StateHasChanged(); }); };
+            Events.Current.Subscribe(GameTelemetry.Current.EventString, telemetryHandler);
         }
+    }
+
+    public void Dispose()
+    {
+        disposed = true;
+        WindowState.Current.NeedsFullReload -= OnSidebarChanged;
+        if (telemetryHandler != null) Events.Current.Unsubscribe(GameTelemetry.Current.EventString, telemetryHandler);
     }
 }
 
@@ -61,10 +78,10 @@
         <!-- We'll eventually have two iframes here, one for the visualization
             and one for the map, that's why we're two divs deep. -->
         <div class="w-full h-full relative">
-            <iframe src="Visualization/index.html" class="w-full h-full bg-bg" />
+            <iframe @key='"visualization"' title="@_("Driving visualization")" src="Visualization/index.html" class="block w-full h-full border-0 bg-bg" />
             
             <!-- Overlay for the visualization -->
-            <div class="absolute top-0 left-0 right-0 bottom-0 flex">
+            <div class="absolute top-0 left-0 right-0 bottom-0 flex" style="padding-left: @(WindowState.Current.IsSidebarOpen ? "210px" : "32px");">
                 <div class="w-full h-full flex flex-col justify-between"> <!-- Left -->
                     <div class="flex flex-row w-full gap-5"> <!-- Top -->
                         <div class="ml-4 mt-4 h-28 w-2 overflow-hidden rounded-md bg-white/15"> <!-- Accel slider -->
@@ -79,7 +96,7 @@
                         </div>
                     </div>
                     <div class="flex w-full h-full justify-end items-end"> <!-- Bottom -->
-                        
+                        <div class="m-4 p-3 rounded-sm bg-bg/90"><DrivingStatus /></div>
                     </div>
                 </div>
                 <div class="w-full h-full flex flex-col"> <!-- Right -->

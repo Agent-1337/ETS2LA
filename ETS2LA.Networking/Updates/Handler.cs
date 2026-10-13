@@ -19,6 +19,15 @@ public class Updater
     // and bundled with the application. If it's missing we fallback to the FallbackSource.
     private const string DistributionSourceFile = "Assets/DistributionSource.txt";
 
+    public static bool IsLocalBuild
+    {
+        get
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, DistributionSourceFile);
+            return File.Exists(path) && File.ReadAllText(path).Trim() == "Local";
+        }
+    }
+
     private static readonly Lazy<Updater> _instance = new(() => new Updater());
     public static Updater Current => _instance.Value;
 
@@ -125,6 +134,7 @@ public class Updater
 
     public UpdaterSource GetSelectedSource()
     {
+        if (IsLocalBuild) return AvailableSources[0];
         var selectedSource = settings.IsSourceSelectedByUser && !string.IsNullOrWhiteSpace(settings.SelectedSource)
             ? settings.SelectedSource
             : GetBundledDefaultSourceName();

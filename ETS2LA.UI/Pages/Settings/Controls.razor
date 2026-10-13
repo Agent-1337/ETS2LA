@@ -4,6 +4,8 @@
 @using ETS2LA.Controls;
 @using ETS2LA.Logging;
 @using ETS2LA.Notifications;
+@using ETS2LA.Controls.Defaults
+@implements IDisposable
 
 @code {
     [Parameter]
@@ -25,21 +27,23 @@
     protected override void OnInitialized()
     {
         base.OnInitialized();
-        Task.Factory.StartNew(async () =>
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
-            while (await timer.WaitForNextTickAsync())
-            {
-                await InvokeAsync(StateHasChanged);
-            }
-        }, TaskCreationOptions.LongRunning);
-
-        controlsBackend.ControlValueChanged += async (s, e) => await HandleControlValueChanged(s, e);
+        controlsBackend.ControlValueChanged += HandleControlValueChanged;
     }
 
-    private async Task HandleControlValueChanged(object? sender, ControlChangeEventArgs e)
+    private bool disposed;
+    private void HandleControlValueChanged(object? sender, ControlChangeEventArgs e)
     {
-        controlValues[e.controlDefinition] = e.NewValue;
+        if (!disposed) InvokeAsync(() => {
+            if (disposed) return;
+            controlValues[e.controlDefinition] = e.NewValue;
+            StateHasChanged();
+        });
+    }
+
+    public void Dispose()
+    {
+        disposed = true;
+        controlsBackend.ControlValueChanged -= HandleControlValueChanged;
     }
 
     private string GetControlType(ControlInstance control)
@@ -176,6 +180,20 @@
             return;
         }
 
+        if (DefaultControls.IsReservedArrow(input.Item1, input.Item2))
+        {
+            NotificationHandler.Current.CloseNotification("ETS2LA.UI.Settings.Controls.Binding");
+            NotificationHandler.Current.SendNotification(new Notifications.Notification {
+                Id = "ETS2LA.UI.Settings.Controls.Binding.Reserved",
+                Title = _("Arrow keys are reserved"),
+                Content = _("Use a different key or controller button. Up enables Full Self-Driving, down disables it, and left/right have no ETS2LA action."),
+                Level = NotificationLevel.Warning
+            });
+            bindingControl = null;
+            bindingThread = null;
+            InvokeAsync(StateHasChanged);
+            return;
+        }
         controlsBackend.UpdateControlBindings(bindingControl.Definition.Id, input.Item1, input.Item2);
         
         Logger.Info(_("Bound control {0} ({1}) to device {2} and control {3}", bindingControl.Definition.Name, bindingControl.Definition.Id, input.Item1, input.Item2));
@@ -195,6 +213,7 @@
 
     private void StartBinding(ControlInstance control)
     {
+        if (DefaultControls.IsDrivingControl(control.Definition.Id)) return;
         if (bindingThread != null && bindingThread.IsAlive)
         {
             bindingThread.Interrupt();
@@ -254,7 +273,11 @@
     }
 }
 
-<div class="grid grid-cols-[repeat(auto-fill,minmax(27rem,1fr))] gap-4 py-2 px-3">
+<div class="flex flex-col gap-4 p-4">
+    <DrivingStatus />
+    <p class="description">@_("Full Self-Driving is the only driving mode. The arrow keys are fixed; left and right have no ETS2LA action.")</p>
+</div>
+<div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))] gap-4 py-2 px-3">
     @foreach (var control in controlInstances)
     {
         if (DisplayOnly.Count > 0 && !DisplayOnly.Contains(control.Definition.Id))
@@ -274,7 +297,7 @@
                     <p class="description">1</p>
                 </div>
                 <div class="flex gap-0">
-                    <button class="@GetClass(control)" @onclick="() => StartBinding(control)">
+                    <button class="@GetClass(control)" disabled="@DefaultControls.IsDrivingControl(control.Definition.Id)" @onclick="() => StartBinding(control)">
                         <p>@GetDeviceName(control)</p>
                         <p>@GetControlType(control) @GetControlIdName(control)</p>
                     </button>

@@ -26,6 +26,18 @@ Please check the [FAQ](https://ets2la.com/help/faq) for answers. If your questio
 > Information below this line is meant for **developers**. If you're a "normal" user then please use the information above.
 
 ### Building the Project
+For a personal Windows build, double-click `start.bat`. Choose **L** to launch the previous build, **R** to rebuild and launch, or **B** to build only. The first build downloads a local .NET 10 SDK and Bun if needed; the self-contained application is saved to `publish/ETS2LA.exe`. Keep the entire `publish` folder together. A successful rebuild keeps the older build in `publish.previous`; a failed compilation leaves the working build available. Existing plugins and libraries are copied from the previous build or installed app. Build logs are under `.build/`.
+
+You can also run `start.bat --build`, `start.bat --rebuild`, or `start.bat --launch` without the menu.
+
+In **Settings → Game SDK**, use **Choose game folder** or **Choose game executable** to add an installation Steam did not find. Select the root containing `core.scs`, or `bin/win_x64/amtrucks.exe` / `eurotrucks2.exe`, then install the SDKs with the game closed. This location is saved and used for map loading. The game version must have a corresponding bundled SDK.
+
+Full Self-Driving is the only driving mode: **↑ enables**, **↓ disables**. Repeated presses keep the same state; **← and → have no ETS2LA action**. Live status is shown in the sidebar, dashboard, visualization, and control settings. Driving plugins still need to be installed and running. Arrow keys are reserved from other plugin bindings. The old enum values remain in the plugin API for compatibility, but assigning them cannot switch the active mode.
+
+The personal build loads a fixed driving profile on every launch: detected speed limit + 5 km/h, fast acceleration, early collision avoidance, a three-second following gap, and an eight-metre stopping gap. Traffic, curves, and traffic lights can reduce the actual speed below the target. Installed driving and visualization plugins start automatically; driving stays disabled until you enable it. A missing, invalid, or stale planned route blocks throttle and applies braking. Brake requests override throttle, and expired pedal requests are reset in both supported output modes. Existing game paths and display language are preserved. The visualization sidebar overlays the canvas without changing its dimensions. The main window behaves normally and never stays above other windows; older always-on-top preferences are ignored.
+
+These agent-assisted changes are for personal use only; this repository does not accept pull requests containing agent changes.
+
 Download .NET 10 from Microsoft. You can find that [here](https://dotnet.microsoft.com/en-us/download/dotnet/10.0). You'll also have to install [Bun](https://bun.sh/).
 
 Now clone the repository and open the solution file in your preferred IDE. We recommend [VSCode](https://code.visualstudio.com). Any code editor should work, but the project comes prepackaged with VSCode tasks for Windows and Linux. You should also download the `C# Dev Kit` extension, other IDEs should have their own equivalent extensions.
