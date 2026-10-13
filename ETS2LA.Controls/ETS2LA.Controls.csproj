@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="ETS2LA.Tests" />
     <ProjectReference Include="..\ETS2LA.Logging\ETS2LA.Logging.csproj" />
     <ProjectReference Include="..\ETS2LA.Shared\ETS2LA.Shared.csproj" />
     <ProjectReference Include="..\ETS2LA.Settings\ETS2LA.Settings.csproj" />

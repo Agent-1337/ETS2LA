@@ -15,4 +15,7 @@
   <ItemGroup>
     <Content Include="..\Assets\SDKs\**\*" Link="Assets\SDKs\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <Compile Remove="GlobalDrivingKeyTests.cs" />
+  </ItemGroup>
 </Project>

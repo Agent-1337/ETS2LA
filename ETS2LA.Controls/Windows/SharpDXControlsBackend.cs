@@ -42,20 +42,36 @@ public class SharpDXControlsBackend : IControlsBackend
     private DirectInput _directInput = new DirectInput();
     private Keyboard _keyboard;
     private readonly DrivingKeyListener drivingKeys;
+    private readonly ControlInstance enableDriving;
+    private readonly ControlInstance disableDriving;
     private volatile bool shutdown;
 
     public SharpDXControlsBackend()
     {
         _keyboard = new Keyboard(_directInput);
         _keyboard.Properties.BufferSize = 16;
-        _keyboard.Acquire();
-
-        RefreshConnectedJoysticks();
+        try { _keyboard.Acquire(); }
+        catch (SharpDX.SharpDXException ex) { Logger.Warn($"DirectInput keyboard acquisition failed: {ex.Message}; global driving keys will still run."); }
 
         RegisterControl(DefaultControls.EnableSelfDriving);
         RegisterControl(DefaultControls.DisableSelfDriving);
-        drivingKeys = new DrivingKeyListener();
+        enableDriving = RegisteredControls.Single(c => c.Definition.Id == DefaultControls.EnableSelfDriving.Id);
+        disableDriving = RegisteredControls.Single(c => c.Definition.Id == DefaultControls.DisableSelfDriving.Id);
+        drivingKeys = new DrivingKeyListener(OnDrivingKeyChanged);
+        try { RefreshConnectedJoysticks(); }
+        catch (Exception ex) { Logger.Warn(_("Failed to refresh joysticks: {0}", ex.Message)); }
         Task.Factory.StartNew(ControlListener, TaskCreationOptions.LongRunning);
+    }
+
+    private void OnDrivingKeyChanged(string key, bool pressed)
+    {
+        if (shutdown) return;
+        // These fixed controls bypass device polling, joystick refresh, binding
+        // dialogs and the mutable plugin control list entirely.
+        var control = key == "Up" ? enableDriving : disableDriving;
+        control.UpdateState(pressed);
+        ControlValueChanged?.Invoke(this, new ControlChangeEventArgs(pressed, control.Definition));
+        if (pressed) Logger.Debug($"Global driving key: {key}");
     }
 
     private void RefreshConnectedJoysticks()
@@ -312,14 +328,6 @@ public class SharpDXControlsBackend : IControlsBackend
         var lastDeviceRefresh = DateTime.MinValue;
         while (!shutdown)
         {
-            while (drivingKeys.Pending.TryDequeue(out var key))
-            {
-                var definition = key.Key == "Up" ? DefaultControls.EnableSelfDriving : DefaultControls.DisableSelfDriving;
-                var control = RegisteredControls.FirstOrDefault(c => c.Definition.Id == definition.Id);
-                if (control == null) continue;
-                control.UpdateState(key.Pressed);
-                ControlValueChanged?.Invoke(this, new ControlChangeEventArgs(key.Pressed, definition));
-            }
             if (pauseListener)
             {
                 Thread.Sleep(10);
