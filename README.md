@@ -38,6 +38,18 @@ The personal build loads a fixed driving profile on every launch: detected speed
 
 These agent-assisted changes are for personal use only; this repository does not accept pull requests containing agent changes.
 
+### Local road awareness (Windows personal build)
+
+The personal build adds a local Grounding DINO detector accelerated through ONNX Runtime DirectML, plus simulator-specific reflective-post and three-rail barricade recognition. Vehicle detections suppress decorative truck stripes. Ground positions are estimated from the game camera and checked against the planned corridor. Three independent observations are required; a single image cannot trigger automatic passing. This is an experimental perception system, not comprehensive obstacle coverage.
+
+Keep ATS/ETS2 visible in the foreground with a forward-facing camera. The detector captures only that game's client area. No frame is uploaded or saved by the driving service. When visual confirmation is unavailable, driving is limited to 20 km/h; an already known obstruction or a lost maneuver sensor causes braking. CPU fallback is allowed for detection, but slow/stale predictions cannot authorize passing. The visualization's **Road awareness** inset shows confirmed roadwork observations and SDK vehicles; the original map-based 3D view is unchanged.
+
+The planner slows before bypassing an obstruction, checks same-direction lane geometry and front/rear traffic gaps, then requests the existing Pathfinding lane change via an indicator. It never initiates a crossing into opposing traffic or across a prefab/junction. Its distance requirement includes PathLib's native lane-change length and the trailer; obstacles first detected too close cause a stop rather than an unsafe late maneuver. Return to the original lane requires trailer clearance and another gap check. A stalled maneuver remains stopped until assistance is disabled and enabled again. Moving queues are followed; stopped vehicles may be passed only with the same checks.
+
+Toll payment requires a fresh, closed gate on the route, a stationary truck, and English/French OCR text explicitly identifying an Enter-to-pay toll prompt. The service pulses the SDK's `activate` command (so it follows the game's interaction binding), never sends global Enter, and waits for payment/gate confirmation. Attempts are bounded to two and a payment acknowledgment is latched for that gate. Ferry, cargo, repair, fuel, and ordinary menu dialogs are not auto-confirmed.
+
+`start.bat` installs the pinned perception assets once (about 720 MB plus language data) under `.tools/perception`, verifies their SHA-256 checksums, and copies them into `publish/Assets/Perception`. Model and native runtime loading, photo detection and synthetic payment OCR have local verification; real work-zone avoidance and toll crossing still need in-game validation. UI/backend regression tests run with `dotnet test ETS2LA.Tests/ETS2LA.Tests.csproj`.
+
 Download .NET 10 from Microsoft. You can find that [here](https://dotnet.microsoft.com/en-us/download/dotnet/10.0). You'll also have to install [Bun](https://bun.sh/).
 
 Now clone the repository and open the solution file in your preferred IDE. We recommend [VSCode](https://code.visualstudio.com). Any code editor should work, but the project comes prepackaged with VSCode tasks for Windows and Linux. You should also download the `C# Dev Kit` extension, other IDEs should have their own equivalent extensions.

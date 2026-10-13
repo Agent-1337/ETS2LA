@@ -7,6 +7,8 @@ using ETS2LA.Backend;
 using ETS2LA.Game;
 using ETS2LA.Game.Telemetry;
 using ETS2LA.State;
+using ETS2LA.State.Autonomy;
+using ETS2LA.Settings;
 using ETS2LA.Logging;
 using ETS2LA.Settings.Global;
 using ETS2LA.Telemetry;
@@ -114,6 +116,7 @@ internal static class Program
             var networking = NetworkingClient.Current;
             var games = GameHandler.Current;
             backend.Start();
+            if (PersonalDrivingProfile.IsEnabled) AutonomySupervisor.Current.Start();
         });
 
         # if LINUX
@@ -132,6 +135,12 @@ internal static class Program
         UserInterface.Start(args);
 
         shutdown = true;
+        if (PersonalDrivingProfile.IsEnabled)
+        {
+            ApplicationState.Current.EnableAssists = false;
+            AutonomySupervisor.Current.Dispose();
+            ETS2LA.Game.Output.GameOutput.Current.Shutdown();
+        }
         PluginBackend.Current.Shutdown();
         OverlayHandler.Current.Shutdown();
         GameTelemetry.Current.Shutdown();

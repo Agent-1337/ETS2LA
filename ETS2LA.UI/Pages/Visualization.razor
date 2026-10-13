@@ -79,6 +79,7 @@
             and one for the map, that's why we're two divs deep. -->
         <div class="w-full h-full relative">
             <iframe @key='"visualization"' title="@_("Driving visualization")" src="Visualization/index.html" class="block w-full h-full border-0 bg-bg" />
+            <div class="absolute right-4 top-36 z-10 pointer-events-none"><RoadAwareness /></div>
             
             <!-- Overlay for the visualization -->
             <div class="absolute top-0 left-0 right-0 bottom-0 flex" style="padding-left: @(WindowState.Current.IsSidebarOpen ? "210px" : "32px");">

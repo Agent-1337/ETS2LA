@@ -84,7 +84,7 @@ public class TrafficProvider
 
     string mmapName = "Local\\ETS2LATraffic";
     string mmapNameLinux = "/dev/shm/ETS2LATraffic";
-    int mmapSize = 6800;
+    int mmapSize = 40 * 174;
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _accessor;
@@ -193,7 +193,7 @@ public class TrafficProvider
 
         List<TrafficVehicle> vehicles = new List<TrafficVehicle>();
         int offset = 0;
-        for (int i = 0; i < 40-1; i++)
+        for (int i = 0; i < 40; i++)
         {
             TrafficVehicle vehicle = new TrafficVehicle();
 
@@ -230,7 +230,7 @@ public class TrafficProvider
             vehicle.isTrailer = _reader.ReadBool(offset); offset += 1;
 
             // 54
-            if(vehicle.trailer_count > 2) { vehicle.trailer_count = 2; }
+            if(vehicle.trailer_count > 3) { vehicle.trailer_count = 3; }
             if(vehicle.trailer_count < 0) { vehicle.trailer_count = 0; }
 
             TrafficTrailer[] trailers = new TrafficTrailer[3];

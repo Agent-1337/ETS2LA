@@ -1,0 +1,54 @@
+@using ETS2LA.State.Autonomy
+@using ETS2LA.Game.Perception
+@using static ETS2LA.Translations.T
+@implements IDisposable
+
+<div class="bg-bg/90 rounded-sm p-3 flex flex-col gap-2" style="width: 210px; max-width: 30vw;" aria-label="@_("Road awareness")">
+    <p class="font-semibold">@_("Road awareness")</p>
+    <p class="text-text-l text-[12px]">@_(current.Perception)</p>
+    @if (current.Route.IsValid)
+    {
+        <svg viewBox="0 0 180 220" width="180" height="220" style="width: 100%; height: auto;" role="img" aria-label="@_("Detected obstacles ahead of the truck")">
+            <line x1="90" y1="0" x2="90" y2="220" stroke="#8d8d8d" stroke-width="1" stroke-dasharray="4 5" />
+            <line x1="74" y1="0" x2="74" y2="220" stroke="#606060" stroke-width="1" />
+            <line x1="106" y1="0" x2="106" y2="220" stroke="#606060" stroke-width="1" />
+            @if (current.Route.LeftLane != 0)
+            { <line x1="39" y1="0" x2="39" y2="220" stroke="#606060" stroke-width="1" /> }
+            @if (current.Route.RightLane != 0)
+            { <line x1="141" y1="0" x2="141" y2="220" stroke="#606060" stroke-width="1" /> }
+            @foreach (var obstacle in current.Obstacles)
+            {
+                var projected = current.Route.Project(obstacle.Position);
+                var ego = current.Route.Project(current.Ego);
+                var ahead = projected.Along - ego.Along;
+                var lateral = projected.Lateral - ego.Lateral;
+                if (ahead < -10 || ahead > 220 || Math.Abs(lateral) > 8) continue;
+                var width = Math.Clamp(obstacle.Radius * 20, 5, 140);
+                var height = Math.Clamp(obstacle.Length * 0.85f, 5, 24);
+                <rect x="@Number(90 + lateral * 10 - width / 2)" y="@Number(205 - ahead * 0.85f - height / 2)" width="@Number(width)" height="@Number(height)"
+                      fill="@(obstacle.Id.StartsWith("vision:") ? "#e5a448" : "#8fadb9")" opacity="0.9">
+                    <title>@_(obstacle.Kind) · @Math.Round(ahead) m</title>
+                </rect>
+            }
+            <rect x="78" y="196" width="24" height="20" fill="#49a5d1"><title>@_("Your truck")</title></rect>
+        </svg>
+        <p class="text-text-l text-[12px]">@_("Orange: roadworks · Blue: vehicles")</p>
+    }
+</div>
+
+@code {
+    private AutonomyStatus current = AutonomyStatus.Empty;
+    [Parameter] public AutonomyStatus? Snapshot { get; set; }
+    private bool disposed;
+    private static string Number(float value) => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+    protected override void OnInitialized()
+    {
+        current = Snapshot ?? AutonomySupervisor.Current.Status;
+        if (Snapshot == null) AutonomySupervisor.Current.Changed += OnChanged;
+    }
+    private void OnChanged(object? sender, EventArgs args)
+    {
+        if (!disposed) InvokeAsync(() => { if (!disposed) { current = AutonomySupervisor.Current.Status; StateHasChanged(); } });
+    }
+    public void Dispose() { disposed = true; AutonomySupervisor.Current.Changed -= OnChanged; }
+}

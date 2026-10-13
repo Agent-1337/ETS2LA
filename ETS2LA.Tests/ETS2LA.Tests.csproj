@@ -17,5 +17,6 @@
   </ItemGroup>
   <ItemGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
     <Compile Remove="GlobalDrivingKeyTests.cs" />
+    <Compile Remove="RoadworkPatternTests.cs" />
   </ItemGroup>
 </Project>

@@ -19,6 +19,9 @@ public class GameOutput
     private readonly DrivingPlanGuard planGuard = new();
     private volatile bool assistsEnabled;
     private string safetyStatus = "";
+    private volatile DrivingEnvelope? drivingEnvelope;
+    private volatile bool shutdown;
+    private readonly Task outputTask;
 
     // Example:
     // "steering" : [(0.5, 1.0), (0.2, 0.5)]
@@ -75,7 +78,17 @@ public class GameOutput
         Events.Current.Subscribe<ControlEvent>(EventString, OnControlEvent);
         Events.Current.Subscribe<bool>("ETS2LA.State.AssistsEnabled", enabled => assistsEnabled = enabled);
         Events.Current.Subscribe<object>("Pathfinding.PlannedPathData", planGuard.Update);
-        Task.Factory.StartNew(Tick, TaskCreationOptions.LongRunning);
+        Events.Current.Subscribe<DrivingEnvelope>(DrivingEnvelope.Event, envelope => drivingEnvelope = envelope);
+        outputTask = Task.Factory.StartNew(Tick, TaskCreationOptions.LongRunning);
+    }
+
+    public void Shutdown()
+    {
+        shutdown = true;
+        assistsEnabled = false;
+        outputTask?.Wait(TimeSpan.FromSeconds(1));
+        IsReset = false;
+        ResetOutputs();
     }
 
     private void TryOpenMemory()
@@ -185,6 +198,7 @@ public class GameOutput
 
     private void ToggleBool(MemoryMappedViewAccessor accessor, int offset)
     {
+        if (shutdown) return;
         WriteBool(accessor, offset, true);
         Thread.Sleep(50);
         WriteBool(accessor, offset, false);
@@ -207,6 +221,7 @@ public class GameOutput
 
     private void ProcessChannel(ControlChannel channel)
     {
+        if (channel.Definition.Id == "ETS2LA.Autonomy.Actions" && !assistsEnabled) { channel.BoolsProcessed = true; return; }
         var boolType = channel.Properties.BooleanType;
         var weight = channel.Properties.Weight;
         float? pedals = ControlMixer.Pedals(channel.Variables);
@@ -253,7 +268,7 @@ public class GameOutput
     public void Tick()
     {
         Stopwatch tickTimer = Stopwatch.StartNew();
-        while(true)
+        while(!shutdown)
         {
             double timeLeft = TickRate - tickTimer.Elapsed.TotalSeconds;
             if (timeLeft > 0 && timeLeft < TickRate)
@@ -304,7 +319,21 @@ public class GameOutput
                 curFrameFloats["steering"].Clear();
                 SetSafetyStatus(_("Braking: route unavailable"));
             }
-            else SetSafetyStatus("");
+            else
+            {
+                var envelope = drivingEnvelope;
+                if (envelope != null && envelope.ValidUntil >= Environment.TickCount64)
+                {
+                    ApplyDrivingEnvelope(envelope, telemetry.truckFloat.speed);
+                    SetSafetyStatus(envelope.Reason);
+                }
+                else if (envelope?.RequireFresh == true)
+                {
+                    curFrameFloats["acceleration"].Add(new(1, -0.7f));
+                    SetSafetyStatus(_("Autonomy updates lost; braking"));
+                }
+                else SetSafetyStatus("");
+            }
 
             WriteFloatFrame(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
 
@@ -312,6 +341,23 @@ public class GameOutput
             tickTimer.Restart();
         }
 
+    }
+
+    private void ApplyDrivingEnvelope(DrivingEnvelope envelope, float speed)
+    {
+        float brake = Math.Clamp(envelope.Brake, 0, 1);
+        if (envelope.MaximumSpeed is float cap && float.IsFinite(cap) && cap >= 0)
+        {
+            if (speed > cap + 0.25f) brake = Math.Max(brake, Math.Clamp((speed - cap) * 0.18f + 0.05f, 0, 0.7f));
+            else if (speed >= cap - 0.4f)
+            {
+                // A ceiling cannot dilute existing brake demands or increase throttle.
+                var values = curFrameFloats["acceleration"];
+                for (int i = 0; i < values.Count; i++)
+                    if (values[i].Item2 > 0) values[i] = new(values[i].Item1, 0);
+            }
+        }
+        if (brake > 0) curFrameFloats["acceleration"].Add(new(1, -brake));
     }
 
     private void CollectControls()
