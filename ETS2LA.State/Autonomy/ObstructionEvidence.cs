@@ -7,11 +7,13 @@ public static class ObstructionEvidence
 {
     public static bool IsVisual(SceneObstacle obstacle) => obstacle.Id.StartsWith("vision:", StringComparison.Ordinal);
     public static bool IsMarker(SceneObstacle obstacle) => obstacle.Kind is "traffic cone" or "reflective roadwork post";
+    public static bool SameRoadSurface(SceneObstacle obstacle, DrivingScene scene) =>
+        Math.Abs(obstacle.Position.Y - scene.Route.PointAt(scene.Route.Project(obstacle.Position).Along).Y) < 3;
 
     public static bool BlocksLane(SceneObstacle obstacle, DrivingScene scene, float offset = 0)
     {
         if (!float.IsFinite(obstacle.Position.X + obstacle.Position.Y + obstacle.Position.Z + obstacle.Radius + obstacle.Length) ||
-            Math.Abs(obstacle.Position.Y - scene.Ego.Y) > 3 || obstacle.Speed >= 1.5f) return false;
+            !SameRoadSurface(obstacle,scene) || obstacle.Speed >= 1.5f) return false;
         float lateral = scene.Route.Project(obstacle.Position).Lateral - offset;
         // Require actual overlap with the body, not the former wide tolerance
         // that classified adjacent parked trucks and roadside barriers as roadblocks.
@@ -31,7 +33,7 @@ public static class ObstructionEvidence
         var distinct = new List<SceneObstacle> { obstacle };
         foreach (var other in scene.Obstacles)
             if (other.Id != obstacle.Id && IsVisual(other) && IsMarker(other) && other.Confidence >= 0.5f &&
-                Math.Abs(other.Position.Y - scene.Ego.Y) < 3 &&
+                SameRoadSurface(other,scene) &&
                 Math.Abs(scene.Route.Project(other.Position).Along - along) < 18 &&
                 halfWidth + other.Radius - Math.Abs(scene.Route.Project(other.Position).Lateral - offset) >= 0.55f &&
                 distinct.All(seen => System.Numerics.Vector3.Distance(seen.Position, other.Position) >= 1.25f)) distinct.Add(other);
@@ -41,7 +43,8 @@ public static class ObstructionEvidence
     public static IReadOnlyList<ObjectDetection> PhysicalCandidates(IReadOnlyList<ObjectDetection> semantic, IReadOnlyList<ObjectDetection> patterned)
     {
         var candidates = semantic.Where(d => d.Label == "concrete barrier" && d.Confidence >= 0.52f ||
-                                             d.Label == "traffic cone" && d.Confidence >= 0.5f).Concat(patterned);
+                                             d.Label == "traffic cone" && d.Confidence >= 0.5f ||
+                                             d.Label is "car" or "truck" && d.Confidence >= 0.65f).Concat(patterned);
         return candidates.Where(d => !semantic.Any(other => other.Label is "road sign" or "mirror" && Contains(other.Box, d.Box))).ToArray();
     }
     private static bool Contains(ImageBox outer, ImageBox inner) => (inner.Left + inner.Right) / 2 >= outer.Left &&

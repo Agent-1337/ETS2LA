@@ -31,6 +31,8 @@ public class GameTelemetry
     private bool shutdown = false;
 
     public bool ReadTrailerData { get; set; } = false;
+    private long lastFreshFrameAt;
+    public long LastFreshFrameAt => Interlocked.Read(ref lastFreshFrameAt);
 
     string mmapName = "Local\\SCSTelemetry";
     string mmapNameLinux = "/dev/shm/SCSTelemetry";
@@ -322,7 +324,9 @@ public class GameTelemetry
         currentData.paused = reader.ReadBool(offset); offset += 1;
         offset += 3; // Padding
 
-        currentData.time = reader.ReadLongLong(offset); offset += 8;
+        ulong sdkTime = reader.ReadLongLong(offset); offset += 8;
+        if (currentData.sdkActive && sdkTime != currentData.time) Interlocked.Exchange(ref lastFreshFrameAt, Environment.TickCount64);
+        currentData.time = sdkTime;
         currentData.simulatedTime = reader.ReadLongLong(offset); offset += 8;
         currentData.renderTime = reader.ReadLongLong(offset); offset += 8;
         currentData.multiplayerTimeOffset = reader.ReadInt(offset); offset += 8;

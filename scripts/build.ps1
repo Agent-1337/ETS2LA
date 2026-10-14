@@ -1,3 +1,4 @@
+param([switch] $StageOnly)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
@@ -5,6 +6,7 @@ $toolsPath = Join-Path $projectRoot '.tools'
 $buildPath = Join-Path $projectRoot '.build'
 $publishPath = Join-Path $projectRoot 'publish'
 $previousPath = Join-Path $projectRoot 'publish.previous'
+$reviewPath = Join-Path $buildPath 'optimized-publish'
 $stagingPath = Join-Path $buildPath ('staging-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $toolsPath, $buildPath -Force | Out-Null
 $buildLock = $null
@@ -25,7 +27,7 @@ function Invoke-BuildCommand([string] $command, [string[]] $commandArgs) {
 function Remove-BuildDirectory([string] $path) {
     # Only these exact generated directories may be removed, never an unchecked computed path.
     $resolved = [IO.Path]::GetFullPath($path).TrimEnd('\')
-    if ($resolved -ne $previousPath -and $resolved -ne $stagingPath) {
+    if ($resolved -ne $previousPath -and $resolved -ne $stagingPath -and $resolved -ne $reviewPath) {
         throw "Refusing to remove an unexpected path: $resolved"
     }
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
@@ -37,7 +39,7 @@ try {
     Start-Transcript -Path (Join-Path $buildPath 'setup.log') -Force | Out-Null
     $transcribing = $true
     foreach ($process in Get-Process ETS2LA -ErrorAction SilentlyContinue) {
-        if ($process.Path -eq (Join-Path $publishPath 'ETS2LA.exe')) {
+        if (!$StageOnly -and $process.Path -eq (Join-Path $publishPath 'ETS2LA.exe')) {
             throw 'Close ETS2LA before rebuilding. You can launch the previous build without rebuilding.'
         }
     }
@@ -107,6 +109,12 @@ try {
     }
     # Mark this as a local build instead of pretending it is an installed release.
     Set-Content -LiteralPath (Join-Path $stagingPath 'Assets\DistributionSource.txt') -Value 'Local' -NoNewline
+    if ($StageOnly) {
+        Remove-BuildDirectory $reviewPath
+        Move-Item -LiteralPath $stagingPath -Destination $reviewPath
+        Write-Host "Build ready: $reviewPath\ETS2LA.exe (running instance preserved)"
+        exit 0
+    }
     Remove-BuildDirectory $previousPath
     if (Test-Path -LiteralPath $publishPath) { Move-Item -LiteralPath $publishPath -Destination $previousPath }
     try { Move-Item -LiteralPath $stagingPath -Destination $publishPath }

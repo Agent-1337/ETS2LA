@@ -22,6 +22,11 @@ public class GameOutput
     private volatile DrivingEnvelope? drivingEnvelope;
     private volatile bool shutdown;
     private readonly Task outputTask;
+    private long lastSteeringAt, lastPedalAt, lastPlanAt;
+    #if WINDOWS
+    private ControlWatchdog? watchdog;
+    public void StartControlWatchdog(string executable) => watchdog ??= new ControlWatchdog(executable);
+    #endif
 
     // Example:
     // "steering" : [(0.5, 1.0), (0.2, 0.5)]
@@ -77,7 +82,7 @@ public class GameOutput
         // Then we start listening to events and spin up the update thread.
         Events.Current.Subscribe<ControlEvent>(EventString, OnControlEvent);
         Events.Current.Subscribe<bool>("ETS2LA.State.AssistsEnabled", enabled => assistsEnabled = enabled);
-        Events.Current.Subscribe<object>("Pathfinding.PlannedPathData", planGuard.Update);
+        Events.Current.Subscribe<object>("Pathfinding.PlannedPathData", plan => { planGuard.Update(plan); if (planGuard.HasFreshPlan) Interlocked.Exchange(ref lastPlanAt, Environment.TickCount64); });
         Events.Current.Subscribe<DrivingEnvelope>(DrivingEnvelope.Event, envelope => drivingEnvelope = envelope);
         outputTask = Task.Factory.StartNew(Tick, TaskCreationOptions.LongRunning);
     }
@@ -89,6 +94,9 @@ public class GameOutput
         outputTask?.Wait(TimeSpan.FromSeconds(1));
         IsReset = false;
         ResetOutputs();
+        #if WINDOWS
+        watchdog?.Dispose(); watchdog = null;
+        #endif
     }
 
     private void TryOpenMemory()
@@ -126,6 +134,9 @@ public class GameOutput
 
     public void OnControlEvent(ControlEvent controlEvent)
     {
+        long now = Environment.TickCount64;
+        if (controlEvent.Variables?.steering is float steering && float.IsFinite(steering)) Interlocked.Exchange(ref lastSteeringAt, now);
+        if (controlEvent.Variables != null && ControlMixer.Pedals(controlEvent.Variables) is float pedal && float.IsFinite(pedal)) Interlocked.Exchange(ref lastPedalAt, now);
         lock (channelLock)
         {
         string channel = controlEvent.ChannelDefinition.Id;
@@ -280,6 +291,15 @@ public class GameOutput
                 }
             }
 
+            var telemetry = GameTelemetry.Current.GetCurrentData();
+            #if WINDOWS
+            var guard = watchdog;
+            long healthyAt = Math.Min(Math.Min(Interlocked.Read(ref lastSteeringAt), Interlocked.Read(ref lastPedalAt)),
+                Math.Min(Interlocked.Read(ref lastPlanAt), GameTelemetry.Current.LastFreshFrameAt));
+            if (drivingEnvelope is { } latestEnvelope) healthyAt = Math.Min(healthyAt, latestEnvelope.ValidUntil - 600);
+            guard?.Pulse(assistsEnabled, telemetry.sdkActive && !telemetry.paused && Math.Abs(telemetry.truckFloat.speed) > 1, healthyAt);
+            #endif
+
             // These || need to be added to silence warnings...
             // If someone knows how to make the compiler understand that MemoryAccessAvailable ensures
             // that the accessors are not null, then please tell me.
@@ -291,7 +311,6 @@ public class GameOutput
                 continue;
             }
 
-            var telemetry = GameTelemetry.Current.GetCurrentData();
             if (!telemetry.sdkActive || telemetry.paused)
             {
                 ResetOutputs();
@@ -313,6 +332,14 @@ public class GameOutput
                 curFrameFloats["steering"].Clear();
                 SetSafetyStatus("");
             }
+            #if WINDOWS
+            else if (guard != null && (!guard.Ready || guard.Latched || Environment.TickCount64 - healthyAt > 600))
+            {
+                curFrameFloats["acceleration"].Add(new(1, -1f));
+                curFrameFloats["steering"].Clear();
+                SetSafetyStatus(guard.Latched ? _("Driving delay detected; game pause requested. Disable and enable assistance to resume.") : _("Waiting for fresh driving controls"));
+            }
+            #endif
             else if (!planGuard.HasFreshPlan)
             {
                 curFrameFloats["acceleration"].Add(new Tuple<float, float>(1, -0.65f));

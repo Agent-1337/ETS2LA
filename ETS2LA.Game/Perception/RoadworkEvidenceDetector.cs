@@ -9,28 +9,24 @@ namespace ETS2LA.Game.Perception;
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 public static class RoadworkEvidenceDetector
 {
-    private sealed record Component(int X, int Y, int Width, int Height, int Pixels)
+    internal sealed record Component(int X, int Y, int Width, int Height, int Pixels)
     {
         public float CenterX => X + Width / 2f;
         public float CenterY => Y + Height / 2f;
     }
 
-    public static IReadOnlyList<ObjectDetection> Detect(Bitmap image, IReadOnlyList<ObjectDetection>? semanticObjects = null)
+    public static IReadOnlyList<ObjectDetection> Detect(Bitmap image, IReadOnlyList<ObjectDetection>? semanticObjects = null, PixelWorkspace? workspace = null)
     {
-        int width = Math.Min(1280, image.Width), height = (int)(image.Height * (width / (float)image.Width));
-        using var scaled = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-        using (var graphics = Graphics.FromImage(scaled)) graphics.DrawImage(image, new Rectangle(0, 0, width, height));
-        var locked = scaled.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-        var pixels = new byte[locked.Stride * height];
-        Marshal.Copy(locked.Scan0, pixels, 0, pixels.Length);
-        scaled.UnlockBits(locked);
-        byte[] orange = new byte[width * height], red = new byte[width * height];
+        using var owned = workspace == null ? new PixelWorkspace() : null;
+        var buffer=workspace??owned!; buffer.Read(image,1280);
+        int width=buffer.Width, height=buffer.Height, stride=buffer.Stride;
+        var pixels=buffer.Pixels; var orange=buffer.Orange; var red=buffer.Red;
         for (int y = height / 4; y < height * 0.88f; y++)
         for (int x = 0; x < width; x++)
         {
             // The default cabin navigation HUD is a 2D display, not world evidence.
             if (x > width * 0.8f && y > height * 0.68f) continue;
-            int p = y * locked.Stride + x * 3;
+            int p = y * stride + x * 3;
             int b = pixels[p], g = pixels[p + 1], r = pixels[p + 2];
             if (r > 145 && g > 55 && r > g * 1.16f && g > b * 1.6f && b < 115) orange[y * width + x] = 1;
             if (r > 110 && r > g * 1.55f && r > b * 1.55f && g < 105 && b < 105) red[y * width + x] = 1;
@@ -66,7 +62,7 @@ public static class RoadworkEvidenceDetector
             for (int yy = y; yy <= Math.Min(height - 1, bottom); yy++)
             for (int xx = x; xx < right; xx++)
             {
-                int p = yy * locked.Stride + xx * 3;
+                int p = yy * stride + xx * 3;
                 int b = pixels[p], g = pixels[p + 1], r = pixels[p + 2];
                 if (r > 130 && g > 130 && b > 130 && Math.Abs(r - g) < 35 && Math.Abs(g - b) < 35) whites++;
                 samples++;
@@ -100,7 +96,7 @@ public static class RoadworkEvidenceDetector
         return merged.Where((detection, index) => detection.Label == "reflective roadwork post" || bands[index].Count >= 3).ToArray();
     }
 
-    private static List<Component> Components(byte[] mask, int width, int height)
+    internal static List<Component> Components(byte[] mask, int width, int height)
     {
         var results = new List<Component>();
         var queue = new Queue<int>();
@@ -113,9 +109,10 @@ public static class RoadworkEvidenceDetector
             {
                 int x = current % width, y = current / width;
                 minX = Math.Min(minX, x); maxX = Math.Max(maxX, x); minY = Math.Min(minY, y); maxY = Math.Max(maxY, y); count++;
-                foreach (var next in new[] { current - width, current + width, current - 1, current + 1 })
-                    if (next >= 0 && next < mask.Length && mask[next] == 1 && Math.Abs(next % width - x) <= 1)
-                    { mask[next] = 0; queue.Enqueue(next); }
+                Visit(current-width); Visit(current+width);
+                if(x>0) Visit(current-1);
+                if(x+1<width) Visit(current+1);
+                void Visit(int next) { if(next>=0 && next<mask.Length && mask[next]==1) { mask[next]=0; queue.Enqueue(next); } }
             }
             results.Add(new(minX, minY, maxX - minX + 1, maxY - minY + 1, count));
         }

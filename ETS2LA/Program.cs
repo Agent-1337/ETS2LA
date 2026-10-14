@@ -35,6 +35,10 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        #if WINDOWS
+        if (args.Length == 3 && args[0] == "--driving-watchdog" && int.TryParse(args[1], out int owner))
+        { Environment.ExitCode = ETS2LA.Game.Output.ControlWatchdog.Run(owner, args[2]); return; }
+        #endif
         // Velopack is the installer / update manager
         // Please don't move this, Velopack has to be initialized before anything else,
         // otherwise we might end up with weird bugs.
@@ -116,7 +120,13 @@ internal static class Program
             var networking = NetworkingClient.Current;
             var games = GameHandler.Current;
             backend.Start();
-            if (PersonalDrivingProfile.IsEnabled) AutonomySupervisor.Current.Start();
+            if (PersonalDrivingProfile.IsEnabled)
+            {
+                #if WINDOWS
+                ETS2LA.Game.Output.GameOutput.Current.StartControlWatchdog(Environment.ProcessPath!);
+                #endif
+                AutonomySupervisor.Current.Start();
+            }
         });
 
         # if LINUX

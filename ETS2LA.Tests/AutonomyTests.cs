@@ -32,7 +32,7 @@ public sealed class AutonomyTests
         Assert.Equal(0, planner.Decide(Scene()).Signal);
         var move = planner.Decide(Scene(1800));
         Assert.Equal(-1, move.Signal);
-        Assert.True(move.SpeedCap <= 13.9f);
+        Assert.True(move.SpeedCap <= Scene().SpeedLimit + 5 / 3.6f);
         Assert.Equal(0, planner.Decide(Scene(2000)).Signal); // Never pulse repeatedly while changing lanes.
     }
 

@@ -6,7 +6,7 @@ using TruckLib;
 
 namespace ETS2LA.State.Autonomy;
 
-public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int RightLane, float LeftOffset, float RightOffset, bool LaneChangeInProgress)
+public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int RightLane, float LeftOffset, float RightOffset, bool LaneChangeInProgress, float LaneChangeAvailableDistance = float.PositiveInfinity)
 {
     public static RouteCorridor Empty { get; } = new([], 0, 0, 0, 0, 0, false);
     public bool IsValid => Points.Length > 2;
@@ -87,6 +87,9 @@ public static class RouteSnapshotBuilder
             int lane = Field<int>(current, "laneIndex"), target = Field<int>(current, "targetLaneIndex");
             int step = Field<Direction>(current, "direction") == Direction.Forward ? 1 : -1;
             int left = lane + step, right = lane - step;
+            float itemFactor = (float)(Call(current, "GetFactorFor", [typeof(Vector3)], ego) ?? 0f);
+            float itemLength = (float)(Call(current, "GetLength", []) ?? 0f);
+            float nativeAvailable = Math.Max(0, (step > 0 ? 1-itemFactor : itemFactor) * itemLength);
             bool Available(int candidate)
             {
                 if (lane == 0 || candidate == 0 || Math.Sign(lane) != Math.Sign(candidate) || target != 0) return false;
@@ -117,7 +120,7 @@ public static class RouteSnapshotBuilder
                 return a is OrientedPoint pa && b is OrientedPoint pb ? Vector3.Distance(pa.Position, pb.Position) : 0;
             }
             float lw = Available(left) ? Width(left) : 0, rw = Available(right) ? Width(right) : 0;
-            return new(points.ToArray(), lane, lw is >= 2.5f and <= 5 ? left : 0, rw is >= 2.5f and <= 5 ? right : 0, -lw, rw, target != 0);
+            return new(points.ToArray(), lane, lw is >= 2.5f and <= 5 ? left : 0, rw is >= 2.5f and <= 5 ? right : 0, -lw, rw, target != 0, nativeAvailable);
         }
         catch (Exception) { return RouteCorridor.Empty; }
     }

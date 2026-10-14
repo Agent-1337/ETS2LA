@@ -26,7 +26,7 @@ public static class VehicleGeometry
             radius = footprint.Max(p => Math.Abs(p.Lateral - center.Lateral));
             length = footprint.Max(p => Math.Abs(p.Along - center.Along)) * 2;
         }
-        return new(id, kind, position, Math.Max(0.2f, radius), speed, 1, Math.Max(1, length));
+        return new(id, kind, position, Math.Max(0.2f, radius), speed, 1, Math.Max(1, length), Height: vehicle.Size.Y);
     }
 
     public static float RigLength(GameTelemetryData data, Vector3 ego) => MeasureRig(data, ego).Length;

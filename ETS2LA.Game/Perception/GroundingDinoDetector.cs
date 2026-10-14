@@ -17,12 +17,17 @@ public sealed class GroundingDinoDetector : IDisposable
     private readonly InferenceSession session;
     private readonly long[] tokens;
     private readonly List<(string Label, int Start, int End)> spans = [];
+    private const int InputSize = 800;
+    private readonly float[] pixelBuffer = new float[3 * InputSize * InputSize];
+    private readonly Bitmap resized = new(InputSize, InputSize, PixelFormat.Format24bppRgb);
+    private readonly byte[] pixelRow = new byte[InputSize * 3];
+    private readonly List<NamedOnnxValue> inputs = [];
     public string ExecutionProvider { get; }
     public string DeviceName { get; } = "CPU";
     public IReadOnlyDictionary<string, NodeMetadata> Inputs => session.InputMetadata;
     public IReadOnlyDictionary<string, NodeMetadata> Outputs => session.OutputMetadata;
     public string LastDiagnostics { get; private set; } = "";
-    private static readonly string[] labels = ["truck", "person", "concrete barrier", "fence", "traffic cone", "road sign", "mirror"];
+    private static readonly string[] labels = ["truck", "person", "concrete barrier", "fence", "traffic cone", "road sign", "mirror", "car"];
 
     public GroundingDinoDetector(string folder, string[]? candidateLabels = null)
     {
@@ -79,59 +84,64 @@ public sealed class GroundingDinoDetector : IDisposable
         }
         ids.Add(vocabulary["[SEP]"]);
         tokens = ids.ToArray();
+        inputs.Add(NamedOnnxValue.CreateFromTensor("pixel_values", new DenseTensor<float>(pixelBuffer, [1, 3, InputSize, InputSize])));
+        inputs.Add(NamedOnnxValue.CreateFromTensor("input_ids", new DenseTensor<long>(tokens, [1, tokens.Length])));
+        foreach (var name in session.InputMetadata.Keys)
+        {
+            if (name == "attention_mask") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(Enumerable.Repeat(1L, tokens.Length).ToArray(), [1, tokens.Length])));
+            if (name == "token_type_ids") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>([1, tokens.Length])));
+            if (name == "pixel_mask") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(Enumerable.Repeat(1L, InputSize * InputSize).ToArray(), [1, InputSize, InputSize])));
+        }
     }
 
     public IReadOnlyList<ObjectDetection> Detect(Bitmap image, float minimumConfidence = 0.28f)
     {
-        const int size = 800;
-        using var resized = new Bitmap(size, size, PixelFormat.Format24bppRgb);
+        const int size = InputSize;
         using (var graphics = Graphics.FromImage(resized))
         {
             graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
             graphics.DrawImage(image, new Rectangle(0, 0, size, size));
         }
-        var pixels = new DenseTensor<float>(new[] { 1, 3, size, size });
         var data = resized.LockBits(new Rectangle(0, 0, size, size), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
         try
         {
-            byte[] row = new byte[data.Stride];
-            float[] mean = [0.485f, 0.456f, 0.406f], std = [0.229f, 0.224f, 0.225f];
             for (int y = 0; y < size; y++)
             {
-                Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, row.Length);
+                Marshal.Copy(data.Scan0 + y * data.Stride, pixelRow, 0, pixelRow.Length);
                 for (int x = 0; x < size; x++)
-                    for (int c = 0; c < 3; c++) pixels[0, c, y, x] = (row[x * 3 + 2 - c] / 255f - mean[c]) / std[c];
+                {
+                    int index = y * size + x, rgb = x * 3;
+                    pixelBuffer[index] = (pixelRow[rgb + 2] / 255f - 0.485f) / 0.229f;
+                    pixelBuffer[size * size + index] = (pixelRow[rgb + 1] / 255f - 0.456f) / 0.224f;
+                    pixelBuffer[2 * size * size + index] = (pixelRow[rgb] / 255f - 0.406f) / 0.225f;
+                }
             }
         }
         finally { resized.UnlockBits(data); }
-        var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("pixel_values", pixels),
-            NamedOnnxValue.CreateFromTensor("input_ids", new DenseTensor<long>(tokens, new[] { 1, tokens.Length })) };
-        foreach (var name in session.InputMetadata.Keys)
-        {
-            if (name == "attention_mask") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(Enumerable.Repeat(1L, tokens.Length).ToArray(), new[] { 1, tokens.Length })));
-            if (name == "token_type_ids") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(new[] { 1, tokens.Length })));
-            if (name == "pixel_mask") inputs.Add(NamedOnnxValue.CreateFromTensor(name, new DenseTensor<long>(Enumerable.Repeat(1L, size * size).ToArray(), new[] { 1, size, size })));
-        }
         using var outputs = session.Run(inputs);
         var logits = outputs.First(x => x.Name == "logits").AsTensor<float>();
         var boxes = outputs.First(x => x.Name == "pred_boxes").AsTensor<float>();
-        var finiteLogits = logits.ToArray().Where(float.IsFinite).ToArray();
-        if (finiteLogits.Length == 0) throw new InvalidDataException("The visual detector produced no finite token scores.");
-        LastDiagnostics = $"Finite logits {finiteLogits.Length}/{logits.Length}; max {(finiteLogits.Length > 0 ? finiteLogits.Max() : float.NaN)}; tokens {string.Join(',', tokens)}";
+        ReadOnlySpan<float> scores = logits is DenseTensor<float> denseScores ? denseScores.Buffer.Span : logits.ToArray();
+        ReadOnlySpan<float> coordinates = boxes is DenseTensor<float> denseBoxes ? denseBoxes.Buffer.Span : boxes.ToArray();
+        int finite = 0; float maximum = float.NegativeInfinity;
+        foreach (float value in scores) if (float.IsFinite(value)) { finite++; maximum = Math.Max(maximum, value); }
+        if (finite == 0) throw new InvalidDataException("The visual detector produced no finite token scores.");
+        LastDiagnostics = $"Finite logits {finite}/{logits.Length}; max {maximum}";
         var results = new List<ObjectDetection>();
         for (int q = 0; q < logits.Dimensions[1]; q++)
         {
             string label = "";
-            float score = 0;
+            float bestLogit = float.NegativeInfinity;
             foreach (var span in spans)
             {
-                float candidate = 0;
-                for (int i = span.Start; i < span.End; i++) candidate = Math.Max(candidate, 1 / (1 + MathF.Exp(-logits[0, q, i])));
-                if (candidate > score) { score = candidate; label = span.Label; }
+                float candidate = float.NegativeInfinity;
+                for (int i = span.Start; i < span.End; i++) candidate = Math.Max(candidate, scores[q * logits.Dimensions[2] + i]);
+                if (candidate > bestLogit) { bestLogit = candidate; label = span.Label; }
             }
+            float score = 1 / (1 + MathF.Exp(-bestLogit));
             if (score < minimumConfidence) continue;
-            float cx = boxes[0, q, 0] * image.Width, cy = boxes[0, q, 1] * image.Height;
-            float w = boxes[0, q, 2] * image.Width, h = boxes[0, q, 3] * image.Height;
+            float cx = coordinates[q * 4] * image.Width, cy = coordinates[q * 4 + 1] * image.Height;
+            float w = coordinates[q * 4 + 2] * image.Width, h = coordinates[q * 4 + 3] * image.Height;
             if (!float.IsFinite(cx + cy + w + h) || w < 3 || h < 3) continue;
             results.Add(new(label, score, new(Math.Clamp(cx - w / 2, 0, image.Width), Math.Clamp(cy - h / 2, 0, image.Height), Math.Clamp(cx + w / 2, 0, image.Width), Math.Clamp(cy + h / 2, 0, image.Height))));
         }
@@ -147,6 +157,6 @@ public sealed class GroundingDinoDetector : IDisposable
         return intersection / Math.Max(1, (a.Right - a.Left) * (a.Bottom - a.Top) + (b.Right - b.Left) * (b.Bottom - b.Top) - intersection);
     }
 
-    public void Dispose() => session.Dispose();
+    public void Dispose() { resized.Dispose(); session.Dispose(); }
 }
 #endif
