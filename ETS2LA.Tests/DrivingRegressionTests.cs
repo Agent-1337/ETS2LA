@@ -60,6 +60,7 @@ public sealed class DrivingRegressionTests
         Assert.Equal(0, acc.RootElement.GetProperty("IgnoredConstraints").GetArrayLength());
         Assert.Equal(3, acc.RootElement.GetProperty("FollowingDistanceOverride").GetInt32());
         Assert.Equal(8, acc.RootElement.GetProperty("StoppingDistance").GetInt32());
+        Assert.Equal(2.25f, acc.RootElement.GetProperty("CenterlineTolerance").GetSingle());
     }
 
     [Fact]

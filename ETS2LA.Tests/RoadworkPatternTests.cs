@@ -27,6 +27,7 @@ public sealed class RoadworkPatternTests
         Rail(g, 300); Rail(g, 330); Rail(g, 360);
         Assert.Single(RoadworkEvidenceDetector.Detect(image).Where(d => d.Label.Contains("barricade")));
         Assert.Empty(RoadworkEvidenceDetector.Detect(image, [new("truck", 0.8f, new(150, 280, 600, 450))]));
+        Assert.Single(RoadworkEvidenceDetector.Detect(image, [new("truck", 0.4f, new(0, 0, 1280, 720))]));
     }
 
     private static void Rail(Graphics g, int y)

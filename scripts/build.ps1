@@ -102,7 +102,7 @@ try {
         }
     }
 
-    foreach ($required in @('ETS2LA.exe', 'ETS2LA.dll', 'ETS2LA.UI.dll', 'coreclr.dll', 'libdeflate.dll', 'Photino.Native.dll', 'WebView2Loader.dll', 'wwwroot\index.html', 'wwwroot\css\app.css', 'wwwroot\Visualization\index.html', 'Assets\SDKs', 'Assets\Perception\grounding-dino.onnx', 'Assets\Perception\vocab.txt', 'Assets\Perception\tessdata\eng.traineddata', 'Assets\Perception\tessdata\fra.traineddata')) {
+    foreach ($required in @('ETS2LA.exe', 'ETS2LA.dll', 'ETS2LA.UI.dll', 'coreclr.dll', 'libdeflate.dll', 'Photino.Native.dll', 'WebView2Loader.dll', 'SharpDX.Direct3D11.dll', 'wwwroot\index.html', 'wwwroot\css\app.css', 'wwwroot\Visualization\index.html', 'Assets\SDKs', 'Assets\Perception\grounding-dino.onnx', 'Assets\Perception\vocab.txt', 'Assets\Perception\tessdata\eng.traineddata', 'Assets\Perception\tessdata\fra.traineddata')) {
         if (!(Test-Path -LiteralPath (Join-Path $stagingPath $required))) { throw "Published build is missing $required." }
     }
     # Mark this as a local build instead of pretending it is an installed release.

@@ -10,6 +10,20 @@ public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int
 {
     public static RouteCorridor Empty { get; } = new([], 0, 0, 0, 0, 0, false);
     public bool IsValid => Points.Length > 2;
+    public Vector3 PointAt(float along)
+    {
+        float length = 0;
+        for (int i = 1; i < Points.Length; i++)
+        {
+            var segment = Points[i] - Points[i - 1];
+            float distance = new Vector2(segment.X, segment.Z).Length();
+            if (distance < 0.01f) continue;
+            if (length + distance >= along || i == Points.Length - 1)
+                return Points[i - 1] + segment * ((along - length) / distance);
+            length += distance;
+        }
+        return Points.FirstOrDefault();
+    }
     public (float Along, float Lateral) Project(Vector3 point)
     {
         float closest = float.PositiveInfinity, length = 0, bestAlong = 0, bestLateral = 0;

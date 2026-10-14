@@ -22,6 +22,7 @@ public sealed class AutonomySupervisor : IDisposable
     private readonly CancellationTokenSource cancellation = new();
     private readonly ManeuverPlanner planner = new();
     private readonly ObstacleTracker tracker = new();
+    private readonly RouteHistory routeHistory = new();
     private readonly ControlChannelDefinition controls = new() { Id = "ETS2LA.Autonomy.Actions", Timeout = 0.25f };
     private volatile VisionSnapshot vision = VisionSnapshot.Empty;
     private volatile object? path;
@@ -52,6 +53,9 @@ public sealed class AutonomySupervisor : IDisposable
     {
         if (started) return;
         started = true;
+        // Attachment, axle and trailer placement data were opt-in. Clearance must
+        // never silently operate on a tractor-only snapshot.
+        GameTelemetry.Current.ReadTrailerData = true;
         Events.Current.Subscribe<object>("Pathfinding.PlannedPathData", OnPath);
         Events.Current.Subscribe(TrafficProvider.Current.EventString, (Action<TrafficData>)OnTraffic);
         Events.Current.Subscribe(ParkedVehiclesProvider.Current.EventString, (Action<ParkedVehicleData>)OnParked);
@@ -59,7 +63,8 @@ public sealed class AutonomySupervisor : IDisposable
         Events.Current.Subscribe(CameraProvider.Current.EventString, (Action<CameraData>)OnCamera);
         decisionLoop = Task.Run(DecisionLoop);
         #if WINDOWS
-        if (OperatingSystem.IsWindows()) visionLoop = Task.Run(VisionLoop);
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 18362)) visionLoop = Task.Run(VisionLoop);
+        else vision = VisionSnapshot.Empty with { Status = "Direct game capture requires Windows 10 version 1903 or later" };
         #else
         vision = VisionSnapshot.Empty with { Status = "Visual roadwork detection currently requires Windows" };
         #endif
@@ -87,6 +92,8 @@ public sealed class AutonomySupervisor : IDisposable
         bool ready = telemetry.sdkActive && !telemetry.paused && now - Interlocked.Read(ref pathAt) < 1000;
         var ego = telemetry.truckPlacement.coordinate.ToVector3();
         var route = ready ? RouteSnapshotBuilder.Build(path, ego) : RouteCorridor.Empty;
+        if (!state.EnableAssists || !telemetry.sdkActive) routeHistory.Clear();
+        else route = routeHistory.Include(route, ego);
         var observation = vision;
         if (state.EnableAssists && observation.CapturedAt != observedAt)
         {
@@ -135,11 +142,12 @@ public sealed class AutonomySupervisor : IDisposable
         bool paid = telemetry.specialBool.tollgate;
         if (paid && !wasPaid) paidAt = now;
         wasPaid = paid;
-        float rigLength = VehicleGeometry.RigLength(telemetry, ego);
+        var rig = VehicleGeometry.MeasureRig(telemetry, ego);
+        float rigLength = rig.Length;
         bool visualFresh = observation.HasForwardView && now - observation.CapturedAt < 1800 && freshFrames >= 3;
         var scene = new DrivingScene(now, state.EnableAssists, ready, ego, telemetry.truckFloat.speed, rigLength, route, obstacles,
             freshTraffic, visualFresh, telemetry.truckBool.blinkerLeftActive, telemetry.truckBool.blinkerRightActive,
-            paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage);
+            paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage, rig);
         var decision = planner.Decide(scene);
         Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, decision.Brake > 0 || decision.SpeedCap != null));
         if (ready && state.EnableAssists && (decision.Signal != 0 || decision.PayToll))
@@ -156,7 +164,7 @@ public sealed class AutonomySupervisor : IDisposable
     }
 
     #if WINDOWS
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.18362")]
     private async Task VisionLoop()
     {
         try
@@ -165,6 +173,7 @@ public sealed class AutonomySupervisor : IDisposable
             using var detector = new GroundingDinoDetector(assets);
             Logger.Info($"Local visual perception initialized on {detector.DeviceName} ({detector.ExecutionProvider}).");
             using var promptReader = new TollPromptReader(assets);
+            using var capture = new GameFrameCapture();
             vision = VisionSnapshot.Empty with { Status = $"Visual perception ready ({detector.ExecutionProvider}); waiting for the game" };
             while (!cancellation.IsCancellationRequested)
             {
@@ -174,9 +183,10 @@ public sealed class AutonomySupervisor : IDisposable
                 var pose = camera;
                 if (!ApplicationState.Current.EnableAssists || !telemetry.sdkActive || telemetry.paused || runningGame == null || pose == null || Environment.TickCount64 - Interlocked.Read(ref cameraAt) > 500)
                 { vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual perception waiting for live game data" }; continue; }
-                using var frame = GameFrameCapture.Capture(runningGame.ExecutablePath);
-                if (frame == null) { vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual perception requires the game in the foreground" }; continue; }
-                long capturedAt = Environment.TickCount64;
+                using var captured = capture.Capture(runningGame.ExecutablePath);
+                if (captured == null) { vision = vision with { HasForwardView = false, TollPrompt = false, Status = capture.Status }; continue; }
+                var frame = captured.Image;
+                long capturedAt = captured.CapturedAt;
                 var ego = telemetry.truckPlacement.coordinate.ToVector3();
                 if (Vector3.Distance(pose.truckPosition, ego) > 5)
                 { vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Camera and truck positions are not synchronized" }; continue; }
@@ -188,7 +198,7 @@ public sealed class AutonomySupervisor : IDisposable
                 if (centerWorld == null || Vector3.Dot(Vector3.Normalize(centerWorld.Value - ego), forward) < 0.8f)
                 { vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual perception requires a forward-facing camera" }; continue; }
                 var semantic = detector.Detect(frame);
-                var detections = semantic.Where(d => d.Label is "traffic cone" or "concrete barrier").Concat(RoadworkEvidenceDetector.Detect(frame, semantic)).ToArray();
+                var detections = ObstructionEvidence.PhysicalCandidates(semantic, RoadworkEvidenceDetector.Detect(frame, semantic));
                 var located = detections.Select(d => CameraGeometry.Locate(d, pose, frame.Width, frame.Height, ego, forward)).Where(o => o != null).Cast<SceneObstacle>().ToArray();
                 bool prompt = Math.Abs(telemetry.truckFloat.speed) < 0.3f && status.Action.Contains("barrier", StringComparison.OrdinalIgnoreCase) && promptReader.Read(frame);
                 long age = Environment.TickCount64 - capturedAt;

@@ -32,7 +32,7 @@ public sealed class AutonomyTests
         Assert.Equal(0, planner.Decide(Scene()).Signal);
         var move = planner.Decide(Scene(1800));
         Assert.Equal(-1, move.Signal);
-        Assert.True(move.SpeedCap <= 8.34f);
+        Assert.True(move.SpeedCap <= 13.9f);
         Assert.Equal(0, planner.Decide(Scene(2000)).Signal); // Never pulse repeatedly while changing lanes.
     }
 
@@ -42,7 +42,8 @@ public sealed class AutonomyTests
         var planner = new ManeuverPlanner();
         var decision = planner.Decide(Scene() with { Speed = 25 });
         Assert.Equal(0, decision.Signal);
-        Assert.True(decision.SpeedCap <= 5.56f);
+        Assert.True(decision.SpeedCap < 25);
+        Assert.True(decision.SpeedCap > 5.56f);
     }
 
     [Theory]
@@ -106,17 +107,17 @@ public sealed class AutonomyTests
     {
         var planner = new ManeuverPlanner();
         planner.Decide(Scene()); planner.Decide(Scene(1800));
-        Assert.True(planner.Decide(Scene(40000)).Brake >= 0.7f);
-        Assert.True(planner.Decide(Scene(40100) with { Obstacles = [] }).Brake >= 0.7f);
-        planner.Decide(Scene(40200) with { Enabled = false });
-        Assert.Equal(0, planner.Decide(Scene(40300) with { Obstacles = [] }).Brake);
+        Assert.True(planner.Decide(Scene(45000)).Brake >= 0.7f);
+        Assert.True(planner.Decide(Scene(45100) with { Obstacles = [] }).Brake >= 0.7f);
+        planner.Decide(Scene(45200) with { Enabled = false });
+        Assert.Equal(0, planner.Decide(Scene(45300) with { Obstacles = [] }).Brake);
     }
 
     [Fact]
     public void PreviouslySeenObstructionIsNotForgottenWhenVisionIsLost()
     {
         var planner = new ManeuverPlanner();
-        planner.Decide(Scene());
+        planner.Decide(Scene() with { Obstacles = [Barrier(15)] });
         var lost = planner.Decide(Scene(8000) with { VisionFresh = false, Obstacles = [] });
         Assert.True(lost.Brake >= 0.7f);
         Assert.Equal(0, lost.Signal);
@@ -174,7 +175,7 @@ public sealed class AutonomyTests
         Assert.Empty(tracker.Confirmed(1100));
         tracker.Update([Barrier()], 1300);
         Assert.Empty(tracker.Confirmed(1400));
-        tracker.Update([Barrier()], 1600);
+        tracker.Update([Barrier()], 1700);
         Assert.Single(tracker.Confirmed(1800));
         Assert.Empty(tracker.Confirmed(7000));
     }

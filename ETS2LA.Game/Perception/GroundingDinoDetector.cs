@@ -22,7 +22,7 @@ public sealed class GroundingDinoDetector : IDisposable
     public IReadOnlyDictionary<string, NodeMetadata> Inputs => session.InputMetadata;
     public IReadOnlyDictionary<string, NodeMetadata> Outputs => session.OutputMetadata;
     public string LastDiagnostics { get; private set; } = "";
-    private static readonly string[] labels = ["truck", "person", "concrete barrier", "fence", "traffic cone"];
+    private static readonly string[] labels = ["truck", "person", "concrete barrier", "fence", "traffic cone", "road sign", "mirror"];
 
     public GroundingDinoDetector(string folder, string[]? candidateLabels = null)
     {

@@ -28,6 +28,8 @@ public static class RoadworkEvidenceDetector
         for (int y = height / 4; y < height * 0.88f; y++)
         for (int x = 0; x < width; x++)
         {
+            // The default cabin navigation HUD is a 2D display, not world evidence.
+            if (x > width * 0.8f && y > height * 0.68f) continue;
             int p = y * locked.Stride + x * 3;
             int b = pixels[p], g = pixels[p + 1], r = pixels[p + 2];
             if (r > 145 && g > 55 && r > g * 1.16f && g > b * 1.6f && b < 115) orange[y * width + x] = 1;
@@ -44,7 +46,7 @@ public static class RoadworkEvidenceDetector
                 if (c != seed && Math.Abs(c.CenterX - seed.CenterX) < Math.Max(5, seed.Width * 1.3f) && c.Y >= seed.Y && c.Y < seed.Y + height * 0.14f) cluster.Add(c);
             int x = cluster.Min(c => c.X), y = cluster.Min(c => c.Y);
             int w = cluster.Max(c => c.X + c.Width) - x, h = cluster.Max(c => c.Y + c.Height) - y;
-            if (h >= 14 && h > w * 1.5f && h < height * 0.18f && cluster.Sum(c => c.Pixels) > 20)
+            if (cluster.Count >= 2 && h >= 14 && h > w * 3.5f && w < width * 0.03f && h < height * 0.18f && cluster.Sum(c => c.Pixels) > 20)
             {
                 foreach (var c in cluster) consumed.Add(c);
                 float scale = image.Width / (float)width;
@@ -74,7 +76,10 @@ public static class RoadworkEvidenceDetector
             float scale = image.Width / (float)width;
             results.Add(new("red and white roadwork barricade", 0.75f, new(x * scale, y * scale, right * scale, Math.Min(height - 1, bottom + Math.Max(12, (right - x) * 0.1f)) * scale)));
         }
-        var filtered = results.Where(candidate => !(semanticObjects ?? []).Any(other => other.Label is "truck" or "car" or "person" &&
+        var filtered = results.Where(candidate => !(semanticObjects ?? []).Any(other => other.Label is "truck" or "car" or "person" or "road sign" or "mirror" &&
+            // Grounding DINO sometimes labels the entire in-cab view as a truck.
+            // That box describes our camera surroundings, not an external occluder.
+            (other.Box.Right - other.Box.Left) * (other.Box.Bottom - other.Box.Top) < image.Width * image.Height * 0.65f &&
             (candidate.Box.Left + candidate.Box.Right) / 2 >= other.Box.Left && (candidate.Box.Left + candidate.Box.Right) / 2 <= other.Box.Right &&
             (candidate.Box.Top + candidate.Box.Bottom) / 2 >= other.Box.Top && (candidate.Box.Top + candidate.Box.Bottom) / 2 <= other.Box.Bottom)).ToArray();
         var merged = new List<ObjectDetection>();

@@ -5,6 +5,8 @@ using ETS2LA.Game.Telemetry;
 
 namespace ETS2LA.State.Autonomy;
 
+public sealed record RigGeometry(float Length, float HalfWidth, IReadOnlyList<Vector3> Footprint, float Articulation, int TrailerCount, bool HasLiveTail = true);
+
 public static class VehicleGeometry
 {
     public static bool IsValid(BaseVehicle vehicle) => float.IsFinite(vehicle.Position.X + vehicle.Position.Y + vehicle.Position.Z) &&
@@ -27,17 +29,50 @@ public static class VehicleGeometry
         return new(id, kind, position, Math.Max(0.2f, radius), speed, 1, Math.Max(1, length));
     }
 
-    public static float RigLength(GameTelemetryData data, Vector3 ego)
+    public static float RigLength(GameTelemetryData data, Vector3 ego) => MeasureRig(data, ego).Length;
+
+    public static RigGeometry MeasureRig(GameTelemetryData data, Vector3 ego)
     {
         var attached = data.trailers.Where(t => t.comBool.attached).ToArray();
-        float length = 12 + attached.Length * 14;
+        float length = 12 + attached.Length * 18;
+        float halfWidth = 1.3f, articulation = 0;
+        int measuredTrailers = 0;
+        var footprint = new List<Vector3>();
+        float truckHeading = (float)data.truckPlacement.rotation.X * MathF.Tau;
+        var truckWheels = data.configVector.truckWheelPositions.Take(Math.Clamp(data.configUI.truckWheelCount, 0, 16)).Where(Finite).ToArray();
+        float tractorRear = Math.Max(8, Math.Max(data.configVector.truckHookPosition.Z + 3, truckWheels.Select(p => p.Z + 3).DefaultIfEmpty(8).Max()));
+        AddBody(ego, truckHeading, -4, tractorRear, 1.3f);
+        float previousHeading = truckHeading;
         foreach (var trailer in attached)
         {
-            float distance = Vector3.Distance(ego, trailer.comDouble.worldPosition);
-            if (!float.IsFinite(distance) || distance > 120) continue;
-            float bodyExtent = Math.Max(14, trailer.comVector.wheelPositions.Where(p => float.IsFinite(p.Z)).Select(p => Math.Abs(p.Z)).DefaultIfEmpty(0).Max() + 5);
-            length = Math.Max(length, distance + bodyExtent);
+            var position = trailer.comDouble.worldPosition;
+            float distance = Vector3.Distance(ego, position), heading = trailer.comDouble.worldRotation.X * MathF.Tau;
+            if (!Finite(position) || !float.IsFinite(heading) || distance > 120 || position == Vector3.Zero && ego.Length() > 120) continue;
+            // Local SDK axes: X right, Z backward. Heading is measured in turns.
+            // The last axle plus a conservative six-metre overhang bounds the tail.
+            var wheels = trailer.comVector.wheelPositions.Take(Math.Clamp(trailer.comUI.wheelCount, 0, 16)).Where(Finite).Where(p => p != Vector3.Zero).ToArray();
+            // Retain configured positions on SDK revisions without wheelCount.
+            if (wheels.Length == 0) wheels = trailer.comVector.wheelPositions.Where(Finite).Where(p => p != Vector3.Zero).ToArray();
+            float rear = wheels.Length > 0 ? Math.Max(8, wheels.Max(p => p.Z) + 6) : 18;
+            float front = Math.Min(-3, Math.Min(trailer.comVector.hookPosition.Z - 1, wheels.Select(p => p.Z - 6).DefaultIfEmpty(-3).Min()));
+            float width = Math.Clamp(wheels.Select(p => Math.Abs(p.X) + 0.55f).DefaultIfEmpty(1.3f).Max(), 1.3f, 2.5f);
+            halfWidth = Math.Max(halfWidth, width);
+            AddBody(position, heading, front, rear, width);
+            if (wheels.Length > 0 && distance > 2) measuredTrailers++;
+            length = Math.Max(length, distance + Math.Max(Math.Abs(front), rear));
+            articulation = Math.Max(articulation, Math.Abs(MathF.IEEERemainder(heading - previousHeading, MathF.Tau)));
+            previousHeading = heading;
         }
-        return Math.Clamp(length, 12, 120);
+        return new(Math.Clamp(length, 12, 120), halfWidth, footprint.ToArray(), articulation, attached.Length, measuredTrailers == attached.Length);
+
+        void AddBody(Vector3 position, float heading, float front, float rear, float width)
+        {
+            if (!float.IsFinite(heading + front + rear + width)) return;
+            var rotation = Matrix4x4.CreateRotationY(heading);
+            foreach (float x in new[] { -width, width })
+            foreach (float z in new[] { front, rear })
+                footprint.Add(position + Vector3.Transform(new(x, 0, z), rotation));
+        }
     }
+    private static bool Finite(Vector3 point) => float.IsFinite(point.X + point.Y + point.Z);
 }
