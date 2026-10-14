@@ -11,12 +11,12 @@ public sealed class ControlWatchdogPolicy
     private long alarmAt;
     private long enabledAt;
     private bool wasEnabled, seenHealthy;
-    public bool Update(long now, bool enabled, bool driving, long outputAt, long healthyAt, bool paused)
+    public bool Update(long now, bool enabled, bool driving, long outputAt, long healthyAt, bool paused, bool brakeFailure = false)
     {
         if (!enabled) { Latched = false; alarmAt = 0; wasEnabled = seenHealthy = false; return false; }
         if (!wasEnabled) { enabledAt=now; wasEnabled=true; }
         if(healthyAt>0 && now-healthyAt<=600 && outputAt>0 && now-outputAt<=450) seenHealthy=true;
-        if (!Latched && driving && outputAt > 0 && (seenHealthy || now-enabledAt>1000) && (now - outputAt > 450 || healthyAt == 0 || now - healthyAt > 600))
+        if (!Latched && (brakeFailure || driving && outputAt > 0 && (seenHealthy || now-enabledAt>1000) && (now - outputAt > 450 || healthyAt == 0 || now - healthyAt > 600)))
         { Latched = true; alarmAt = now; }
         return Latched && !paused && now - alarmAt < 5000;
     }
@@ -44,9 +44,11 @@ public sealed class ControlWatchdog : IDisposable
     }
     public void Pulse(bool enabled, bool driving, long healthyAt)
     {
+        if (!enabled) state.Write(40,0);
         state.Write(0,enabled?1:0); state.Write(4,driving?1:0); state.Write(16,healthyAt);
         Thread.MemoryBarrier(); state.Write(8,Environment.TickCount64);
     }
+    public void RequestEmergencyStop() => state.Write(40,1);
     public void Dispose()
     {
         state.Write(0,0); state.Write(36,1);
@@ -70,7 +72,7 @@ public sealed class ControlWatchdog : IDisposable
             {
                 long now=Environment.TickCount64;
                 state.Write(24,now);
-                bool requestPause=policy.Update(now,state.ReadInt32(0)!=0,state.ReadInt32(4)!=0,state.ReadInt64(8),state.ReadInt64(16),controls.IsPaused);
+                bool requestPause=policy.Update(now,state.ReadInt32(0)!=0,state.ReadInt32(4)!=0,state.ReadInt64(8),state.ReadInt64(16),controls.IsPaused,state.ReadInt32(40)!=0);
                 state.Write(32,policy.Latched?1:0);
                 if(policy.Latched) controls.Apply(requestPause);
                 else if(wasLatched) controls.Clear();

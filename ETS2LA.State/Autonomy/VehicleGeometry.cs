@@ -5,7 +5,7 @@ using ETS2LA.Game.Telemetry;
 
 namespace ETS2LA.State.Autonomy;
 
-public sealed record RigGeometry(float Length, float HalfWidth, IReadOnlyList<Vector3> Footprint, float Articulation, int TrailerCount, bool HasLiveTail = true);
+public sealed record RigGeometry(float Length, float HalfWidth, IReadOnlyList<Vector3> Footprint, float Articulation, int TrailerCount, bool HasLiveTail = true, float TrackingSpan = 24);
 
 public static class VehicleGeometry
 {
@@ -40,6 +40,8 @@ public static class VehicleGeometry
         var footprint = new List<Vector3>();
         float truckHeading = (float)data.truckPlacement.rotation.X * MathF.Tau;
         var truckWheels = data.configVector.truckWheelPositions.Take(Math.Clamp(data.configUI.truckWheelCount, 0, 16)).Where(Finite).ToArray();
+        float tractorSpan = truckWheels.Length > 1 ? Math.Clamp(truckWheels.Max(p => p.Z) - truckWheels.Min(p => p.Z), 4, 12) : 8;
+        float trackingSquared = tractorSpan * tractorSpan;
         float tractorRear = Math.Max(8, Math.Max(data.configVector.truckHookPosition.Z + 3, truckWheels.Select(p => p.Z + 3).DefaultIfEmpty(8).Max()));
         AddBody(ego, truckHeading, -4, tractorRear, 1.3f);
         float previousHeading = truckHeading;
@@ -59,11 +61,14 @@ public static class VehicleGeometry
             halfWidth = Math.Max(halfWidth, width);
             AddBody(position, heading, front, rear, width);
             if (wheels.Length > 0 && distance > 2) measuredTrailers++;
+            float trailerSpan = wheels.Length > 0 ?
+                Math.Clamp(Math.Abs(wheels.Average(p => p.Z) - trailer.comVector.hookPosition.Z), 4, 24) : 24;
+            trackingSquared += trailerSpan * trailerSpan;
             length = Math.Max(length, distance + Math.Max(Math.Abs(front), rear));
             articulation = Math.Max(articulation, Math.Abs(MathF.IEEERemainder(heading - previousHeading, MathF.Tau)));
             previousHeading = heading;
         }
-        return new(Math.Clamp(length, 12, 120), halfWidth, footprint.ToArray(), articulation, attached.Length, measuredTrailers == attached.Length);
+        return new(Math.Clamp(length, 12, 120), halfWidth, footprint.ToArray(), articulation, attached.Length, measuredTrailers == attached.Length, MathF.Sqrt(trackingSquared));
 
         void AddBody(Vector3 position, float heading, float front, float rear, float width)
         {

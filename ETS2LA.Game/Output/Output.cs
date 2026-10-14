@@ -17,12 +17,15 @@ public class GameOutput
     public Dictionary<string, ControlChannel> Channels = new Dictionary<string, ControlChannel>();
     private readonly object channelLock = new();
     private readonly DrivingPlanGuard planGuard = new();
+    private readonly BrakeResponseGuard brakeResponse = new();
     private volatile bool assistsEnabled;
     private string safetyStatus = "";
     private volatile DrivingEnvelope? drivingEnvelope;
     private volatile bool shutdown;
     private readonly Task outputTask;
     private long lastSteeringAt, lastPedalAt, lastPlanAt;
+    private long lastBrakeDiagnostic;
+    private string? lastBrakeFailure;
     #if WINDOWS
     private ControlWatchdog? watchdog;
     public void StartControlWatchdog(string executable) => watchdog ??= new ControlWatchdog(executable);
@@ -292,6 +295,8 @@ public class GameOutput
             }
 
             var telemetry = GameTelemetry.Current.GetCurrentData();
+            if (!assistsEnabled || !telemetry.sdkActive || telemetry.paused)
+                brakeResponse.Update(Environment.TickCount64, 0, assistsEnabled, false, 0, 0, 0, 0);
             #if WINDOWS
             var guard = watchdog;
             long healthyAt = Math.Min(Math.Min(Interlocked.Read(ref lastSteeringAt), Interlocked.Read(ref lastPedalAt)),
@@ -314,7 +319,7 @@ public class GameOutput
             if (!telemetry.sdkActive || telemetry.paused)
             {
                 ResetOutputs();
-                SetSafetyStatus(assistsEnabled ? _("Waiting for the game SDK") : "");
+                SetSafetyStatus(assistsEnabled ? brakeResponse.Failure ?? (telemetry.paused ? _("Game paused") : _("Waiting for the game SDK")) : "");
                 tickTimer.Restart();
                 continue;
             }
@@ -331,6 +336,12 @@ public class GameOutput
                 curFrameFloats["acceleration"].Clear();
                 curFrameFloats["steering"].Clear();
                 SetSafetyStatus("");
+            }
+            else if (brakeResponse.Failure is { } failedBrake)
+            {
+                curFrameFloats["acceleration"].Add(new(1, -1));
+                curFrameFloats["steering"].Clear();
+                SetSafetyStatus(_(failedBrake));
             }
             #if WINDOWS
             else if (guard != null && (!guard.Ready || guard.Latched || Environment.TickCount64 - healthyAt > 600))
@@ -362,6 +373,27 @@ public class GameOutput
                 else SetSafetyStatus("");
             }
 
+            float pedal = ControlMixer.Resolve(curFrameFloats["acceleration"], brakePriority: true);
+            string? brakeFailure = brakeResponse.Update(Environment.TickCount64, GameTelemetry.Current.LastFreshFrameAt,
+                assistsEnabled, telemetry.sdkActive && !telemetry.paused, -pedal, telemetry.truckFloat.speed,
+                telemetry.truckFloat.gameBrake, telemetry.truckFloat.gameThrottle,
+                drivingEnvelope is { } brakingEnvelope && brakingEnvelope.ValidUntil >= Environment.TickCount64 ? brakingEnvelope.StoppingDistance : null);
+            if (brakeFailure != null)
+            {
+                if (lastBrakeFailure != brakeFailure) Logger.Error(brakeFailure);
+                lastBrakeFailure = brakeFailure;
+                curFrameFloats["acceleration"].Add(new(1, -1));
+                SetSafetyStatus(_(brakeFailure));
+                #if WINDOWS
+                watchdog?.RequestEmergencyStop();
+                #endif
+            }
+            else lastBrakeFailure = null;
+            if (pedal <= -0.35f && Environment.TickCount64 - lastBrakeDiagnostic >= 1000)
+            {
+                lastBrakeDiagnostic = Environment.TickCount64;
+                Logger.Debug($"Brake response: requested={-pedal:F2}, gameBrake={telemetry.truckFloat.gameBrake:F2}, gameThrottle={telemetry.truckFloat.gameThrottle:F2}, speed={telemetry.truckFloat.speed * 3.6f:F1} km/h, reason={safetyStatus}");
+            }
             WriteFloatFrame(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
 
             curFrameFloats.Clear();
@@ -430,7 +462,18 @@ public class GameOutput
             }
             else if (propName == "acceleration")
             {
-                if (GameSettings.Current.EnableModernOutputForPedals)
+                // Safety braking must not depend on the virtual controller's
+                // per-profile input mapping. Send the same brake through both
+                // SDK paths; direct input also suppresses residual throttle.
+                if (weightedValue < 0)
+                {
+                    WriteFloat(legacy, legacyShmOffsets["aforward"], 0);
+                    WriteFloat(legacy, legacyShmOffsets["abackward"], -weightedValue);
+                    WriteFloat(modern, 13, weightedValue);
+                    WriteDouble(modern, 18, time);
+                    WriteBool(modern, 17, true);
+                }
+                else if (GameSettings.Current.EnableModernOutputForPedals)
                 {
                     WriteFloat(legacy, legacyShmOffsets["aforward"], 0);
                     WriteFloat(legacy, legacyShmOffsets["abackward"], 0);

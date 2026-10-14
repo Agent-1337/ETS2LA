@@ -6,7 +6,7 @@ namespace ETS2LA.State.Autonomy;
 public sealed record DrivingScene(long Now, bool Enabled, bool Ready, Vector3 Ego, float Speed, float RigLength,
     RouteCorridor Route, IReadOnlyList<SceneObstacle> Obstacles, bool TrafficFresh, bool VisionFresh,
     bool LeftIndicator, bool RightIndicator, bool PaidToll, int? ClosedGateId, float GateDistance, bool TollPrompt, float SpeedLimit = 20, bool MergeCoverage = true, RigGeometry? Rig = null);
-public sealed record ManeuverDecision(string Status, float Brake = 0, float? SpeedCap = null, int Signal = 0, bool PayToll = false);
+public sealed record ManeuverDecision(string Status, float Brake = 0, float? SpeedCap = null, int Signal = 0, bool PayToll = false, float? StoppingDistance = null);
 
 /// <summary>Conservative behavior planning on known corridors; never crosses into opposing traffic.</summary>
 public sealed class ManeuverPlanner
@@ -16,6 +16,7 @@ public sealed class ManeuverPlanner
     private int originLane, targetLane, changeDirection;
     private readonly Dictionary<string, SceneObstacle> bypassed = [];
     private SceneObstacle? rememberedHazard;
+    private SceneObstacle[] rememberedMarkers = [];
     private float longestRig;
     private float changeSpeed = 13.89f;
     private long changeStarted, settledAt;
@@ -32,7 +33,7 @@ public sealed class ManeuverPlanner
         passing = false; tollGate = null; tollAttempts = 0; tollStationarySince = lastPayment = 0;
         tollConfirmed = false;
         handover = null;
-        bypassed.Clear(); rememberedHazard = null; longestRig = 0;
+        bypassed.Clear(); rememberedHazard = null; rememberedMarkers = []; longestRig = 0;
     }
 
     public ManeuverDecision Decide(DrivingScene scene)
@@ -78,22 +79,27 @@ public sealed class ManeuverPlanner
         }
 
         float egoAlong = scene.Route.Project(scene.Ego).Along;
-        var hazards = scene.Obstacles.Select(o => (Obstacle: o, P: scene.Route.Project(o.Position)))
+        // A confirmed stationary obstruction does not disappear because one fresh
+        // image or the closest-vehicle SDK list temporarily omits it. An explicit
+        // observation that it moved/cleared can release it; disabling also resets it.
+        IEnumerable<SceneObstacle> candidates = scene.Obstacles;
+        if (rememberedHazard is { } previous && scene.Obstacles.Any(o => o.Id == previous.Id && (o.Speed >= 1.5f ||
+            !ObstructionEvidence.SameRoadSurface(o, scene) || Math.Abs(scene.Route.Project(o.Position).Lateral) >= o.Radius + (scene.Rig?.HalfWidth ?? 1.3f))))
+        { rememberedHazard = null; rememberedMarkers = []; }
+        if (!passing && rememberedHazard is { } knownHazard && !scene.Obstacles.Any(o => o.Id == knownHazard.Id))
+            candidates = candidates.Append(knownHazard);
+        if (!passing && rememberedHazard != null)
+            candidates = candidates.Concat(rememberedMarkers.Where(marker => !scene.Obstacles.Any(o => o.Id == marker.Id) && marker.Id != rememberedHazard.Id));
+        var evaluatedScene = scene with { Obstacles = candidates.ToArray() };
+        var hazards = evaluatedScene.Obstacles.Select(o => (Obstacle: o, P: scene.Route.Project(o.Position)))
             .Where(x => x.P.Along - egoAlong > -3 && x.P.Along - egoAlong < 250 && ObstructionEvidence.SameRoadSurface(x.Obstacle, scene) &&
-                        ObstructionEvidence.BlocksLane(x.Obstacle, scene))
+                        ObstructionEvidence.BlocksLane(x.Obstacle, evaluatedScene))
             .OrderBy(x => x.P.Along).ToArray();
         var hazard = hazards.FirstOrDefault();
         if (hazard.Obstacle == null)
         {
             hazardId = null;
-            if (!passing && !scene.VisionFresh && rememberedHazard is { } known)
-            {
-                var p = scene.Route.Project(known.Position);
-                float knownGap = p.Along - egoAlong - known.Length / 2 - 4;
-                if (knownGap > -3 && Math.Abs(p.Lateral) < known.Radius + (scene.Rig?.HalfWidth ?? 1.3f) - 0.55f)
-                    return Approach(scene, knownGap, "Approaching a previously confirmed obstruction");
-                rememberedHazard = null;
-            }
+            if (!passing) { rememberedHazard = null; rememberedMarkers = []; }
             if (passing && scene.Now - settledAt > 10000 && scene.TrafficFresh && scene.VisionFresh && scene.MergeCoverage)
             {
                 int returnDirection = -changeDirection;
@@ -111,24 +117,30 @@ public sealed class ManeuverPlanner
         }
         var obstacle = hazard.Obstacle;
         rememberedHazard = obstacle;
+        rememberedMarkers = ObstructionEvidence.IsMarker(obstacle) ? evaluatedScene.Obstacles.Where(o => ObstructionEvidence.IsMarker(o) &&
+            Math.Abs(scene.Route.Project(o.Position).Along - hazard.P.Along) < 18 && ObstructionEvidence.BlocksLane(o, evaluatedScene)).ToArray() : [];
         if (hazardId != obstacle.Id) { hazardId = obstacle.Id; blockedSince = scene.Now; }
         float gap = hazard.P.Along - egoAlong - obstacle.Length / 2 - 4;
         bool roadwork = ObstructionEvidence.IsVisual(obstacle) && obstacle.Kind is not ("car" or "truck");
-        float stopping = scene.Speed * scene.Speed / 8 + scene.Speed * 1.5f + 10;
-        float brake = gap <= stopping ? Math.Clamp((stopping - gap) / Math.Max(10, stopping) + 0.2f, 0.2f, 1) : 0;
         if (!scene.TrafficFresh || !scene.VisionFresh || !scene.MergeCoverage) return Approach(scene, gap, "Confirmed obstacle ahead; automatic passing suspended");
         if (scene.LeftIndicator || scene.RightIndicator || scene.Route.LaneChangeInProgress) return Approach(scene, gap, "Obstacle ahead; driver lane change takes priority");
+        if (scene.Rig is { TrailerCount: > 0, HasLiveTail: false }) return Approach(scene, gap, "Waiting for complete trailer geometry before passing");
         if (scene.Now - blockedSince < (roadwork ? obstacle.Confirmed ? 0 : 500 : 5000)) return Approach(scene, gap, roadwork ? "Confirming a blocked lane" : "Following stopped traffic");
-        // Slow first, so a complete lane transition fits before the obstruction.
+        // Native transitions have a fixed spatial curve. Check where the rig
+        // actually clears each obstruction, rather than adding the entire rig
+        // length to a requirement to finish the whole curve before its near face.
         float nativeDistance = NativeChangeDistance(scene);
         if (nativeDistance < 35) return Approach(scene, gap, "Waiting for a suitable lane-change section");
-        float requiredDistance = nativeDistance + scene.RigLength + 12;
         float width = Math.Max(3, Math.Max(Math.Abs(scene.Route.LeftOffset), Math.Abs(scene.Route.RightOffset)));
         float mergeSpeed = Math.Min(scene.SpeedLimit > 0 ? scene.SpeedLimit + 5 / 3.6f : 8.33f, MathF.Sqrt(nativeDistance * nativeDistance / (6 * width)));
         if (scene.Speed > mergeSpeed + 0.5f) return Approach(scene, gap, "Slowing to a stable lane-change speed", mergeSpeed);
-        if (gap < requiredDistance) return new("Stopped: insufficient distance for a complete lane change", Math.Max(brake, gap < 30 ? 0.7f : 0), 0);
-        int direction = scene.Route.LeftLane != 0 && GapClear(scene, scene.Route.LeftOffset) ? -1 :
-                        roadwork && scene.Route.RightLane != 0 && GapClear(scene, scene.Route.RightOffset) ? 1 : 0;
+        // Include a temporarily missing remembered obstruction in clearance too.
+        bool leftFits = scene.Route.LeftLane != 0 && LaneChangeClearance.CanClear(evaluatedScene, scene.Route.LeftOffset);
+        bool rightFits = roadwork && scene.Route.RightLane != 0 && LaneChangeClearance.CanClear(evaluatedScene, scene.Route.RightOffset);
+        if (!leftFits && !rightFits)
+            return scene.Speed < 0.3f ? new("Stopped before obstruction; no collision-free native lane-change path", 0.85f, 0) :
+                Approach(scene, gap, "Preparing to stop; no collision-free native lane-change path");
+        int direction = leftFits && GapClear(scene, scene.Route.LeftOffset) ? -1 : rightFits && GapClear(scene, scene.Route.RightOffset) ? 1 : 0;
         if (direction == 0) return Approach(scene, gap, "Confirmed obstruction; adjacent lane occupied or unavailable");
         if (passing) return Approach(scene, gap, "Another confirmed obstruction ahead");
         originLane = scene.Route.Lane;
@@ -141,9 +153,11 @@ public sealed class ManeuverPlanner
     private static ManeuverDecision Approach(DrivingScene scene, float gap, string status, float ceiling = float.PositiveInfinity)
     {
         float cap = Math.Min(ceiling, MathF.Sqrt(Math.Max(0, (gap - 10) * 3)));
-        float brake = gap < 12 ? 0.7f : 0;
+        float available = Math.Max(0.5f, gap - 8 - Math.Max(0, scene.Speed) * 0.4f);
+        float deceleration = scene.Speed * scene.Speed / (2 * available);
+        float brake = gap < 12 ? 0.85f : scene.Speed > cap + 0.25f ? Math.Clamp(0.2f + deceleration / 6, 0.35f, 1) : 0;
         // Far-away warnings do not instantly force the truck down to 20 km/h.
-        return new(status, brake, cap);
+        return new(status, brake, cap, StoppingDistance: Math.Max(0, gap - 8));
     }
 
     private void UpdateBypassZone(DrivingScene scene)
@@ -177,8 +191,7 @@ public sealed class ManeuverPlanner
         return rear > end + Math.Max(20, scene.Speed * 2);
     }
 
-    private static float NativeChangeDistance(DrivingScene scene) => float.IsNaN(scene.Route.LaneChangeAvailableDistance) ? 0 :
-        Math.Max(0, Math.Min(5 * Math.Max(20, scene.SpeedLimit), scene.Route.LaneChangeAvailableDistance));
+    private static float NativeChangeDistance(DrivingScene scene) => LaneChangeClearance.NativeDistance(scene);
 
     private static bool GapClear(DrivingScene scene, float offset)
     {
@@ -188,8 +201,8 @@ public sealed class ManeuverPlanner
             var p = scene.Route.Project(obstacle.Position);
             if (!ObstructionEvidence.SameRoadSurface(obstacle, scene) || Math.Abs(p.Lateral - offset) > obstacle.Radius + 1.6f) continue;
             float gap = p.Along - egoAlong;
-            float ahead = Math.Max(30, scene.Speed * 4) + obstacle.Length / 2;
             float transitionSeconds = NativeChangeDistance(scene) / Math.Max(5.55f, Math.Min(scene.Speed, 13.89f)) + 3;
+            float ahead = Math.Max(30, scene.Speed * 4) + Math.Max(0, scene.Speed - obstacle.Speed) * transitionSeconds + obstacle.Length / 2;
             float behind = Math.Max(scene.RigLength + 15, Math.Max(0, obstacle.Speed - scene.Speed) * transitionSeconds) + obstacle.Length / 2;
             if (gap > -behind && gap < ahead) return false;
         }

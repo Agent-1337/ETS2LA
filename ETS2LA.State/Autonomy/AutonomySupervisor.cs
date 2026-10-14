@@ -150,7 +150,7 @@ public sealed class AutonomySupervisor : IDisposable
             freshTraffic, visualFresh, telemetry.truckBool.blinkerLeftActive, telemetry.truckBool.blinkerRightActive,
             paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage, rig);
         var decision = planner.Decide(scene);
-        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, state.EnableAssists));
+        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, state.EnableAssists, decision.StoppingDistance));
         if (ready && state.EnableAssists && (decision.Signal != 0 || decision.PayToll))
         {
             Events.Current.Publish(GameOutput.Current.EventString, new ControlEvent
