@@ -14,12 +14,12 @@ public static class VehicleGeometry
         vehicle.Size.Y is >= 0.2f and <= 20 && vehicle.Size.Z is >= 0.2f and <= 80;
     public static SceneObstacle Observe(BaseVehicle vehicle, string id, string kind, float speed, RouteCorridor route)
     {
-        var corners = vehicle.GetCornersOnGround();
+        var corners = GroundCorners(vehicle);
         // SDK positions are bounding-box centers. The legacy rotation helper's
         // Y conversion is for visualization, so use the SDK height for contact level.
         Vector3 position = vehicle.Position with { Y = vehicle.Position.Y - vehicle.Size.Y / 2 };
         float radius = vehicle.Size.X / 2, length = vehicle.Size.Z;
-        if (route.IsValid)
+        if (route.IsValid && corners.Length == 4)
         {
             var center = route.Project(position);
             var footprint = corners.Select(route.Project).ToArray();
@@ -27,6 +27,21 @@ public static class VehicleGeometry
             length = footprint.Max(p => Math.Abs(p.Along - center.Along)) * 2;
         }
         return new(id, kind, position, Math.Max(0.2f, radius), speed, 1, Math.Max(1, length), Height: vehicle.Size.Y);
+    }
+
+    public static Vector3[] GroundCorners(BaseVehicle vehicle)
+    {
+        // The SDK wire layout is W,X,Y,Z; the existing public Rotation property
+        // retains that layout for visualization plugin compatibility. Transform
+        // body geometry with System.Numerics' actual X,Y,Z,W ordering.
+        var raw = vehicle.Rotation;
+        var rotation = new Quaternion(raw.Y, raw.Z, raw.W, raw.X);
+        if (!float.IsFinite(rotation.LengthSquared()) || rotation.LengthSquared() < 0.5f) return [];
+        rotation = Quaternion.Normalize(rotation);
+        var half = vehicle.Size / 2;
+        return new[] { new Vector3(-half.X, -half.Y, -half.Z), new(half.X, -half.Y, -half.Z),
+            new Vector3(half.X, -half.Y, half.Z), new(-half.X, -half.Y, half.Z) }
+            .Select(p => vehicle.Position + Vector3.Transform(p, rotation)).ToArray();
     }
 
     public static float RigLength(GameTelemetryData data, Vector3 ego) => MeasureRig(data, ego).Length;

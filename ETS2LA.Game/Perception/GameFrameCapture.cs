@@ -31,12 +31,13 @@ public sealed class GameFrameCapture : IDisposable
                 window != IntPtr.Zero && (!IsWindow(window) || currentOwner != owner)) Reset();
             if (capture == null)
             {
+                if (!WindowGraphicsCapture.BorderlessAllowed) { Status = WindowGraphicsCapture.BorderlessStatus; return null; }
                 if (Environment.TickCount64 < retryAt) return null;
                 window = FindWindow(executable);
                 if (window == IntPtr.Zero) { Status = "Waiting for the selected game window"; return null; }
                 selectedExecutable = executable;
                 GetWindowThreadProcessId(window, out owner);
-                capture = new WindowGraphicsCapture(window);
+                capture = new WindowGraphicsCapture(window, requireBorderless: true);
             }
             if (IsIconic(window)) { Status = "Game minimized; visual maneuvers suspended"; return null; }
             var result = capture.CaptureClient();

@@ -16,7 +16,7 @@ public static class PersonalDrivingProfile
             {"DisplayUnits":0,"DesiredSpeedStaticOffset":1.3888889,"DesiredSpeedPercentageOffset":0,"FallbackSpeed":8.333334}
             """,
         ["AssistanceSettings.json"] = """
-            {"SeparateCruiseAndSteering":false,"PauseWhenUnstable":true,"AccelerationResponse":2,"SteeringSensitivity":1,"FollowingDistance":2,"SetSpeedBehaviourOption":0,"SpeedLimitWarningOption":0,"CollisionAvoidanceOption":3,"MaximumSpeed":0,"EnabledTrafficRules":[0,1,2]}
+            {"SeparateCruiseAndSteering":false,"PauseWhenUnstable":false,"AccelerationResponse":2,"SteeringSensitivity":1,"FollowingDistance":2,"SetSpeedBehaviourOption":0,"SpeedLimitWarningOption":0,"CollisionAvoidanceOption":3,"MaximumSpeed":0,"EnabledTrafficRules":[0,1,2]}
             """,
         ["tumppi066.adaptivecruisecontrol.json"] = """
             {"AccelerationDampeningFactor":0.8,"PositivePedalMultiplier":1,"IgnoredConstraints":[],"OverrideFollowingDistance":true,"FollowingDistanceOverride":3,"CenterlineTolerance":2.25,"MaxLateralAcceleration":1.25,"MinimumSpeed":4.166667,"MaximumDistance":200,"PointStep":2,"StoppingDistance":8}

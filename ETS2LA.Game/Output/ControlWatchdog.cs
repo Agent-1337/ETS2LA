@@ -9,14 +9,15 @@ public sealed class ControlWatchdogPolicy
 {
     public bool Latched { get; private set; }
     private long alarmAt;
-    private long enabledAt;
-    private bool wasEnabled, seenHealthy;
+    private bool seenHealthy;
     public bool Update(long now, bool enabled, bool driving, long outputAt, long healthyAt, bool paused, bool brakeFailure = false)
     {
-        if (!enabled) { Latched = false; alarmAt = 0; wasEnabled = seenHealthy = false; return false; }
-        if (!wasEnabled) { enabledAt=now; wasEnabled=true; }
+        if (!enabled) { Latched = false; alarmAt = 0; seenHealthy = false; return false; }
         if(healthyAt>0 && now-healthyAt<=600 && outputAt>0 && now-outputAt<=450) seenHealthy=true;
-        if (!Latched && (brakeFailure || driving && outputAt > 0 && (seenHealthy || now-enabledAt>1000) && (now - outputAt > 450 || healthyAt == 0 || now - healthyAt > 600)))
+        // Input acquisition and individual plugin failures are handled by the
+        // main process's readiness/handover policy. Only a stopped output loop or
+        // an explicit imminent-collision brake failure can request a game pause.
+        if (!Latched && (brakeFailure || driving && outputAt > 0 && seenHealthy && now - outputAt > 1500))
         { Latched = true; alarmAt = now; }
         return Latched && !paused && now - alarmAt < 5000;
     }

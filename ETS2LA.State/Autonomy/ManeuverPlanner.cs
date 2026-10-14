@@ -100,7 +100,7 @@ public sealed class ManeuverPlanner
         {
             hazardId = null;
             if (!passing) { rememberedHazard = null; rememberedMarkers = []; }
-            if (passing && scene.Now - settledAt > 10000 && scene.TrafficFresh && scene.VisionFresh && scene.MergeCoverage)
+            if (passing && scene.Now - settledAt > 10000 && scene.TrafficFresh && scene.MergeCoverage)
             {
                 int returnDirection = -changeDirection;
                 int returnLane = returnDirection < 0 ? scene.Route.LeftLane : scene.Route.RightLane;
@@ -113,7 +113,7 @@ public sealed class ManeuverPlanner
             }
             bool clear = passing && TailClearedZone(scene);
             return new(passing ? clear ? "Work zone cleared; waiting for a return gap" : "Passing the work zone; waiting for trailer clearance" :
-                scene.VisionFresh ? "Monitoring traffic and roadworks" : "Cruising; visual maneuvers suspended", SpeedCap: passing && !clear ? 13.89f : RigTurnGuard.SpeedCap(scene));
+                "Monitoring traffic and roadworks", SpeedCap: passing && !clear ? 13.89f : RigTurnGuard.SpeedCap(scene));
         }
         var obstacle = hazard.Obstacle;
         rememberedHazard = obstacle;
@@ -122,10 +122,14 @@ public sealed class ManeuverPlanner
         if (hazardId != obstacle.Id) { hazardId = obstacle.Id; blockedSince = scene.Now; }
         float gap = hazard.P.Along - egoAlong - obstacle.Length / 2 - 4;
         bool roadwork = ObstructionEvidence.IsVisual(obstacle) && obstacle.Kind is not ("car" or "truck");
-        if (!scene.TrafficFresh || !scene.VisionFresh || !scene.MergeCoverage) return Approach(scene, gap, "Confirmed obstacle ahead; automatic passing suspended");
+        bool nativeObstacle = !ObstructionEvidence.IsVisual(obstacle);
+        bool nativeParked = nativeObstacle && obstacle.Id.StartsWith("parked:", StringComparison.Ordinal);
+        if (!scene.TrafficFresh || !nativeObstacle && !scene.VisionFresh || !scene.MergeCoverage) return Approach(scene, gap, "Confirmed obstacle ahead; automatic passing suspended");
         if (scene.LeftIndicator || scene.RightIndicator || scene.Route.LaneChangeInProgress) return Approach(scene, gap, "Obstacle ahead; driver lane change takes priority");
         if (scene.Rig is { TrailerCount: > 0, HasLiveTail: false }) return Approach(scene, gap, "Waiting for complete trailer geometry before passing");
-        if (scene.Now - blockedSince < (roadwork ? obstacle.Confirmed ? 0 : 500 : 5000)) return Approach(scene, gap, roadwork ? "Confirming a blocked lane" : "Following stopped traffic");
+        int confirmation = nativeParked ? 350 :
+            roadwork ? obstacle.Confirmed ? 0 : 500 : 1800;
+        if (scene.Now - blockedSince < confirmation) return Approach(scene, gap, roadwork ? "Confirming a blocked lane" : "Confirming stopped traffic");
         // Native transitions have a fixed spatial curve. Check where the rig
         // actually clears each obstruction, rather than adding the entire rig
         // length to a requirement to finish the whole curve before its near face.
@@ -136,7 +140,7 @@ public sealed class ManeuverPlanner
         if (scene.Speed > mergeSpeed + 0.5f) return Approach(scene, gap, "Slowing to a stable lane-change speed", mergeSpeed);
         // Include a temporarily missing remembered obstruction in clearance too.
         bool leftFits = scene.Route.LeftLane != 0 && LaneChangeClearance.CanClear(evaluatedScene, scene.Route.LeftOffset);
-        bool rightFits = roadwork && scene.Route.RightLane != 0 && LaneChangeClearance.CanClear(evaluatedScene, scene.Route.RightOffset);
+        bool rightFits = (roadwork || nativeParked) && scene.Route.RightLane != 0 && LaneChangeClearance.CanClear(evaluatedScene, scene.Route.RightOffset);
         if (!leftFits && !rightFits)
             return scene.Speed < 0.3f ? new("Stopped before obstruction; no collision-free native lane-change path", 0.85f, 0) :
                 Approach(scene, gap, "Preparing to stop; no collision-free native lane-change path");
@@ -217,7 +221,7 @@ public sealed class ManeuverPlanner
         if (scene.Speed > 0.25f || scene.GateDistance > 12)
         {
             tollStationarySince = 0;
-            return new("Approaching a closed barrier", scene.GateDistance < 9 ? 0.7f : 0, Math.Min(5.55f, MathF.Sqrt(Math.Max(0, (scene.GateDistance - 7) * 4))));
+            return new("Approaching a closed barrier", scene.GateDistance < 9 ? 0.7f : 0, Math.Min(5.55f, MathF.Sqrt(Math.Max(0, (scene.GateDistance - 7) * 4))), StoppingDistance: Math.Max(0,scene.GateDistance-7));
         }
         if (tollStationarySince == 0) tollStationarySince = scene.Now;
         if (!scene.TrafficFresh || !scene.VisionFresh || !scene.TollPrompt) return new("Stopped at barrier; waiting for a toll payment prompt", 0.6f);

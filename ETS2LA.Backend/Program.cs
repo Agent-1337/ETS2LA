@@ -45,7 +45,7 @@ namespace ETS2LA.Backend
                 PluginHandler.LoadPlugins();
                 if (PersonalDrivingProfile.IsEnabled)
                 {
-                    foreach (string id in new[] { "tumppi066.pathfinding", "tumppi066.laneassist", "tumppi066.adaptivecruisecontrol", "tumppi066.visualizationsockets" })
+                    foreach (string id in new[] { "tumppi066.pathfinding", "tumppi066.laneassist", "tumppi066.visualizationsockets" })
                     {
                         var plugin = PluginHandler.LoadedPlugins.FirstOrDefault(p => p.Info.Id == id);
                         if (plugin != null && !plugin._IsRunning) PluginHandler.EnablePlugin(plugin);

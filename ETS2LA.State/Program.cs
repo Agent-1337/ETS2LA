@@ -44,6 +44,11 @@ public class ApplicationState
             DrivingSafetyReason = reason;
             DrivingStatusChanged?.Invoke(this, EventArgs.Empty);
         });
+        Events.Current.Subscribe<string>(ETS2LA.Game.Output.GameOutput.UnavailableEvent, reason => {
+            EnableAssists = false;
+            DrivingSafetyReason = reason;
+            NotificationHandler.Current.SendNotification(new Notification { Id = "DrivingUnavailable", Title = _("Manual control"), Content = _(reason), CloseAfter = 8 });
+        });
 
         assistanceSettings = AssistanceSettings.Current;
 

@@ -5,6 +5,7 @@ using static ETS2LA.Translations.T;
 using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
 using ETS2LA.Game.Telemetry;
+using ETS2LA.Settings;
 
 namespace ETS2LA.Game.Output;
 
@@ -18,6 +19,11 @@ public class GameOutput
     private readonly object channelLock = new();
     private readonly DrivingPlanGuard planGuard = new();
     private readonly BrakeResponseGuard brakeResponse = new();
+    private readonly DrivingReadiness readiness = new();
+    private readonly bool personalBuild = PersonalDrivingProfile.IsEnabled;
+    public const string UnavailableEvent = "ETS2LA.Game.Output.Unavailable";
+    public DrivingPhase Phase => readiness.Phase;
+    private bool handoverSent;
     private volatile bool assistsEnabled;
     private string safetyStatus = "";
     private volatile DrivingEnvelope? drivingEnvelope;
@@ -137,6 +143,7 @@ public class GameOutput
 
     public void OnControlEvent(ControlEvent controlEvent)
     {
+        if (personalBuild && controlEvent.ChannelDefinition.Id.StartsWith("AdaptiveCruiseControl.", StringComparison.Ordinal)) return;
         long now = Environment.TickCount64;
         if (controlEvent.Variables?.steering is float steering && float.IsFinite(steering)) Interlocked.Exchange(ref lastSteeringAt, now);
         if (controlEvent.Variables != null && ControlMixer.Pedals(controlEvent.Variables) is float pedal && float.IsFinite(pedal)) Interlocked.Exchange(ref lastPedalAt, now);
@@ -295,6 +302,12 @@ public class GameOutput
             }
 
             var telemetry = GameTelemetry.Current.GetCurrentData();
+            long now = Environment.TickCount64;
+            bool controlsReady = MemoryAccessAvailable && planGuard.HasFreshPlan && now - Interlocked.Read(ref lastSteeringAt) < 400 &&
+                now - Interlocked.Read(ref lastPedalAt) < 400 && now - GameTelemetry.Current.LastFreshFrameAt < 400 &&
+                (!personalBuild || drivingEnvelope is { HasValidRoute: true } freshEnvelope && freshEnvelope.ValidUntil >= now);
+            var phase = readiness.Update(now, assistsEnabled, telemetry.sdkActive && controlsReady, telemetry.paused);
+            if (!assistsEnabled) handoverSent = false;
             if (!assistsEnabled || !telemetry.sdkActive || telemetry.paused)
                 brakeResponse.Update(Environment.TickCount64, 0, assistsEnabled, false, 0, 0, 0, 0);
             #if WINDOWS
@@ -302,7 +315,8 @@ public class GameOutput
             long healthyAt = Math.Min(Math.Min(Interlocked.Read(ref lastSteeringAt), Interlocked.Read(ref lastPedalAt)),
                 Math.Min(Interlocked.Read(ref lastPlanAt), GameTelemetry.Current.LastFreshFrameAt));
             if (drivingEnvelope is { } latestEnvelope) healthyAt = Math.Min(healthyAt, latestEnvelope.ValidUntil - 600);
-            guard?.Pulse(assistsEnabled, telemetry.sdkActive && !telemetry.paused && Math.Abs(telemetry.truckFloat.speed) > 1, healthyAt);
+            guard?.Pulse(assistsEnabled && readiness.HasEngaged && phase != DrivingPhase.Handover,
+                telemetry.sdkActive && !telemetry.paused && Math.Abs(telemetry.truckFloat.speed) > 1, healthyAt);
             #endif
 
             // These || need to be added to silence warnings...
@@ -312,6 +326,8 @@ public class GameOutput
             {
                 TryOpenMemory();
                 SetSafetyStatus(assistsEnabled ? _("Waiting for the game SDK") : "");
+                if (phase == DrivingPhase.Handover && !handoverSent)
+                { handoverSent = true; Events.Current.Publish(UnavailableEvent, "Game SDK unavailable; manual control restored."); }
                 tickTimer.Restart();
                 continue;
             }
@@ -339,23 +355,31 @@ public class GameOutput
             }
             else if (brakeResponse.Failure is { } failedBrake)
             {
+                curFrameFloats["acceleration"].Clear();
                 curFrameFloats["acceleration"].Add(new(1, -1));
                 curFrameFloats["steering"].Clear();
                 SetSafetyStatus(_(failedBrake));
             }
             #if WINDOWS
-            else if (guard != null && (!guard.Ready || guard.Latched || Environment.TickCount64 - healthyAt > 600))
+            else if (guard?.Latched == true)
             {
+                curFrameFloats["acceleration"].Clear();
                 curFrameFloats["acceleration"].Add(new(1, -1f));
                 curFrameFloats["steering"].Clear();
-                SetSafetyStatus(guard.Latched ? _("Driving delay detected; game pause requested. Disable and enable assistance to resume.") : _("Waiting for fresh driving controls"));
+                SetSafetyStatus(_("Driving process stopped responding; emergency pause requested. Disable assistance to resume."));
             }
             #endif
-            else if (!planGuard.HasFreshPlan)
+            else if (phase is DrivingPhase.Preparing or DrivingPhase.Recovering or DrivingPhase.Handover)
             {
-                curFrameFloats["acceleration"].Add(new Tuple<float, float>(1, -0.65f));
-                curFrameFloats["steering"].Clear();
-                SetSafetyStatus(_("Braking: route unavailable"));
+                curFrameFloats["acceleration"].Clear();
+                if (phase != DrivingPhase.Recovering) curFrameFloats["steering"].Clear();
+                string missing = !planGuard.HasFreshPlan || drivingEnvelope?.HasValidRoute == false ? "navigation route" :
+                    now - GameTelemetry.Current.LastFreshFrameAt >= 400 ? "game telemetry" :
+                    now - Interlocked.Read(ref lastSteeringAt) >= 400 ? "steering controller" : "speed controller";
+                string reason = phase == DrivingPhase.Handover ? $"Self-driving unavailable: {missing}. Manual control restored." :
+                    phase == DrivingPhase.Preparing ? $"Preparing self-driving: waiting for {missing}" : $"Recovering {missing}";
+                SetSafetyStatus(_(reason));
+                if (phase == DrivingPhase.Handover && !handoverSent) { handoverSent = true; Events.Current.Publish(UnavailableEvent, reason); }
             }
             else
             {
@@ -365,17 +389,14 @@ public class GameOutput
                     ApplyDrivingEnvelope(envelope, telemetry.truckFloat.speed);
                     SetSafetyStatus(envelope.Reason);
                 }
-                else if (envelope?.RequireFresh == true)
-                {
-                    curFrameFloats["acceleration"].Add(new(1, -0.7f));
-                    SetSafetyStatus(_("Autonomy updates lost; braking"));
-                }
                 else SetSafetyStatus("");
             }
 
             float pedal = ControlMixer.Resolve(curFrameFloats["acceleration"], brakePriority: true);
             string? brakeFailure = brakeResponse.Update(Environment.TickCount64, GameTelemetry.Current.LastFreshFrameAt,
-                assistsEnabled, telemetry.sdkActive && !telemetry.paused, -pedal, telemetry.truckFloat.speed,
+                assistsEnabled, phase == DrivingPhase.Active && telemetry.sdkActive && !telemetry.paused &&
+                    drivingEnvelope?.StoppingDistance is float obstacleDistance && obstacleDistance < Math.Max(8, Math.Abs(telemetry.truckFloat.speed) * 3),
+                -pedal, telemetry.truckFloat.speed,
                 telemetry.truckFloat.gameBrake, telemetry.truckFloat.gameThrottle,
                 drivingEnvelope is { } brakingEnvelope && brakingEnvelope.ValidUntil >= Environment.TickCount64 ? brakingEnvelope.StoppingDistance : null);
             if (brakeFailure != null)
@@ -389,6 +410,7 @@ public class GameOutput
                 #endif
             }
             else lastBrakeFailure = null;
+            ApplyEngineBrake(pedal, telemetry, assistsEnabled && phase == DrivingPhase.Active);
             if (pedal <= -0.35f && Environment.TickCount64 - lastBrakeDiagnostic >= 1000)
             {
                 lastBrakeDiagnostic = Environment.TickCount64;
@@ -400,6 +422,13 @@ public class GameOutput
             tickTimer.Restart();
         }
 
+    }
+
+    private void ApplyEngineBrake(float pedal, GameTelemetryData telemetry, bool engaged)
+    {
+        if (personalBuild && legacyAccessor is { } legacy && legacyShmOffsets.TryGetValue("motorbrake", out int offset))
+            WriteBool(legacy, offset, EngineBrakePolicy.ShouldApply(pedal, telemetry.truckFloat.speed,
+                telemetry.truckFloat.engineRpm, telemetry.truckBool.engineEnabled, engaged));
     }
 
     private void ApplyDrivingEnvelope(DrivingEnvelope envelope, float speed)

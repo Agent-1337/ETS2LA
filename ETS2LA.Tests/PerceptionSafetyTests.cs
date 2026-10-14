@@ -13,32 +13,37 @@ public sealed class PerceptionSafetyTests
     {
         var policy=new ControlWatchdogPolicy();
         Assert.False(policy.Update(1000,true,true,1000,1000,false));
-        Assert.True(policy.Update(1500,true,true,1000,1000,false));
+        Assert.False(policy.Update(1500,true,true,1000,1000,false));
+        Assert.True(policy.Update(2600,true,true,1000,1000,false));
         Assert.True(policy.Latched);
-        Assert.True(policy.Update(1600,true,true,1600,1600,false));
-        Assert.False(policy.Update(1700,true,true,1700,1700,true)); // Pause acknowledged, never toggle it back off.
+        Assert.True(policy.Update(2700,true,true,2700,2700,false));
+        Assert.False(policy.Update(2800,true,true,2800,2800,true)); // Pause acknowledged, never toggle it back off.
         Assert.True(policy.Latched);
-        Assert.False(policy.Update(1800,false,false,1800,1800,true));
+        Assert.False(policy.Update(2900,false,false,2900,2900,true));
         Assert.False(policy.Latched);
     }
 
     [Fact]
-    public void FreshOutputCannotHideStaleSteeringOrTelemetry()
+    public void MissingPluginCommandsUseReadinessHandoverInsteadOfAnEmergencyPause()
     {
         var policy=new ControlWatchdogPolicy();
         policy.Update(1000,true,true,1000,1000,false);
-        Assert.True(policy.Update(2000,true,true,2000,1300,false));
+        Assert.False(policy.Update(2000,true,true,2000,1300,false));
+        var readiness = new DrivingReadiness();
+        Assert.Equal(DrivingPhase.Active, readiness.Update(1000,true,true));
+        Assert.Equal(DrivingPhase.Recovering, readiness.Update(2000,true,false));
+        Assert.Equal(DrivingPhase.Handover, readiness.Update(3300,true,false));
         Assert.False(new ControlWatchdogPolicy().Update(2000,true,false,1000,1000,true));
         Assert.False(new ControlWatchdogPolicy().Update(2000,false,true,1000,1000,false));
     }
 
     [Fact]
-    public void FirstEnableAllowsABoundedControllerWarmupWhileOutputHoldsTheBrake()
+    public void FirstEnableCannotPauseBeforeAnyHealthyControllerHasBeenAcquired()
     {
         var policy=new ControlWatchdogPolicy();
         Assert.False(policy.Update(1000,true,true,1000,0,false));
         Assert.False(policy.Update(1500,true,true,1500,0,false));
-        Assert.True(policy.Update(2101,true,true,2101,0,false));
+        Assert.False(policy.Update(2101,true,true,2101,0,false));
     }
 
     [Fact]

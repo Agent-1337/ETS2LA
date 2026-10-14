@@ -31,9 +31,12 @@ public sealed unsafe class WindowGraphicsCapture : IDisposable
     private volatile bool stopping;
     private IntPtr latest;
     public string FrameStatus { get; private set; } = "Starting game surface capture";
+    private static readonly Lazy<Task<bool>> borderlessPermission = new(() => Task.Run(RequestBorderlessPermission));
+    public static bool BorderlessAllowed => borderlessPermission.Value.IsCompletedSuccessfully && borderlessPermission.Value.Result;
+    public static string BorderlessStatus => borderlessPermission.Value.IsCompleted ? "Windows did not allow borderless capture; native driving remains active" : "Waiting for Windows borderless capture permission";
     private CapturedGameFrame? Unavailable(string reason) { FrameStatus = reason; return null; }
 
-    public WindowGraphicsCapture(IntPtr gameWindow)
+    public WindowGraphicsCapture(IntPtr gameWindow, bool requireBorderless = false)
     {
         window = gameWindow;
         int initialized = RoInitialize(1);
@@ -70,12 +73,65 @@ public sealed unsafe class WindowGraphicsCapture : IDisposable
             IntPtr createdSession;
             Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr*, int>)Slot(pool, 10))(pool, item, &createdSession));
             session = createdSession;
+            bool borderless = TryRemoveBorder(session);
+            if (requireBorderless && !borderless) throw new InvalidOperationException("Borderless game capture is not available");
             Check(((delegate* unmanaged[Stdcall]<IntPtr, int>)Slot(session, 6))(session));
             captureWorker = new Thread(Pump) { IsBackground = true, Name = "ETS2LA.GameSurface" };
             captureWorker.Start();
         }
         catch { Dispose(); throw; }
         finally { RoUninitialize(); }
+    }
+
+    private static bool TryRemoveBorder(IntPtr session)
+    {
+        IntPtr settings = IntPtr.Zero;
+        try
+        {
+            settings = Query(session, new("F2CDD966-22AE-5EA1-9596-3A289344C3BE"));
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, byte, int>)Slot(settings, 7))(settings, 0));
+            byte required;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, byte*, int>)Slot(settings, 6))(settings, &required));
+            return required == 0;
+        }
+        catch { return false; }
+        finally { Release(ref settings); }
+    }
+
+    private static bool RequestBorderlessPermission()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 20348)) return false;
+        int initialized = RoInitialize(1);
+        if (initialized < 0) return false;
+        IntPtr factory = IntPtr.Zero, operation = IntPtr.Zero, info = IntPtr.Zero;
+        try
+        {
+            // Windows presents its own consent prompt. Never suppress the
+            // capture border unless its Borderless access request is allowed.
+            factory = Factory("Windows.Graphics.Capture.GraphicsCaptureAccess", new("743ED370-06EC-5040-A58A-901F0F757095"));
+            IntPtr created;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, int, IntPtr*, int>)Slot(factory, 6))(factory, 0, &created));
+            operation = created;
+            info = Query(operation, new("00000036-0000-0000-C000-000000000046"));
+            var timer = Stopwatch.StartNew();
+            while (timer.Elapsed.TotalSeconds < 60)
+            {
+                int status;
+                Check(((delegate* unmanaged[Stdcall]<IntPtr, int*, int>)Slot(info, 7))(info, &status));
+                if (status == 1)
+                {
+                    int result;
+                    Check(((delegate* unmanaged[Stdcall]<IntPtr, int*, int>)Slot(operation, 8))(operation, &result));
+                    return result == 4; // AppCapabilityAccessStatus.Allowed
+                }
+                if (status != 0) return false;
+                Thread.Sleep(25);
+            }
+            ((delegate* unmanaged[Stdcall]<IntPtr, int>)Slot(info, 9))(info);
+            return false;
+        }
+        catch { return false; }
+        finally { Release(ref info); Release(ref operation); Release(ref factory); RoUninitialize(); }
     }
 
     public CapturedGameFrame? CaptureClient()

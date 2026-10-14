@@ -7,12 +7,13 @@ using ETS2LA.Game.SDK;
 using ETS2LA.Game.Telemetry;
 using ETS2LA.Logging;
 using TruckLib;
+using ETS2LA.Game;
 
 namespace ETS2LA.State.Autonomy;
 
 public sealed record AutonomyStatus(string Action, string Perception, IReadOnlyList<SceneObstacle> Obstacles, RouteCorridor Route, Vector3 Ego)
 {
-    public static AutonomyStatus Empty { get; } = new("Manual driving", "Visual perception starting", [], RouteCorridor.Empty, Vector3.Zero);
+    public static AutonomyStatus Empty { get; } = new("Manual driving", "Native road monitoring starting", [], RouteCorridor.Empty, Vector3.Zero);
 }
 
 /// <summary>Runs independently of UI focus and existing plugins, using their live data and control channels.</summary>
@@ -21,6 +22,10 @@ public sealed class AutonomySupervisor : IDisposable
     public static AutonomySupervisor Current { get; } = new();
     private readonly CancellationTokenSource cancellation = new();
     private readonly ManeuverPlanner planner = new();
+    private readonly NativeCruiseController cruise = new();
+    private readonly NativeRouteRecovery routeRecovery = new();
+    private readonly ControlChannelDefinition cruiseChannel = new() { Id = "ETS2LA.Autonomy.Cruise", Timeout = 0.35f };
+    private volatile bool tollNeedsPrompt;
     private readonly ObstacleTracker tracker = new();
     private readonly RouteHistory routeHistory = new();
     private readonly ControlChannelDefinition controls = new() { Id = "ETS2LA.Autonomy.Actions", Timeout = 0.25f };
@@ -40,10 +45,23 @@ public sealed class AutonomySupervisor : IDisposable
     private volatile bool started;
     public AutonomyStatus Status => status;
     public event EventHandler? Changed;
-    private void OnPath(object data) { path = data; Interlocked.Exchange(ref pathAt, Environment.TickCount64); }
-    private void OnTraffic(TrafficData data) { traffic = data; Interlocked.Exchange(ref trafficAt, Environment.TickCount64); }
-    private void OnParked(ParkedVehicleData data) { parked = data; Interlocked.Exchange(ref parkedAt, Environment.TickCount64); }
-    private void OnGates(SemaphoreData data) { semaphores = data; Interlocked.Exchange(ref gatesAt, Environment.TickCount64); }
+    private void OnPath(object data)
+    {
+        path = data; Interlocked.Exchange(ref pathAt, Environment.TickCount64);
+        // This callback runs on the planner's publishing thread. Re-seeding here
+        // does not race its list iteration and takes effect on its next tick.
+        if (ApplicationState.Current.EnableAssists && data.GetType().GetField("HasError")?.GetValue(data) is true &&
+            ETS2LA.Backend.PluginBackend.Current.PluginHandler?.LoadedPlugins.FirstOrDefault(p => p.Info.Id == "tumppi066.pathfinding") is { } plugin)
+        {
+            var telemetry = GameTelemetry.Current.GetCurrentData();
+            if (telemetry.sdkActive && !telemetry.paused && routeRecovery.TryRecover(plugin,
+                telemetry.truckPlacement.coordinate.ToVector3(), telemetry.truckPlacement.rotation.ToVector3(), Environment.TickCount64))
+                Logger.Info("Navigation recovered at a road boundary using native map geometry.");
+        }
+    }
+    private void OnTraffic(TrafficData data) { traffic = NativeSceneSnapshot.Copy(data); Interlocked.Exchange(ref trafficAt, Environment.TickCount64); }
+    private void OnParked(ParkedVehicleData data) { parked = NativeSceneSnapshot.Copy(data); Interlocked.Exchange(ref parkedAt, Environment.TickCount64); }
+    private void OnGates(SemaphoreData data) { semaphores = NativeSceneSnapshot.Copy(data); Interlocked.Exchange(ref gatesAt, Environment.TickCount64); }
     private void OnCamera(CameraData data)
     {
         camera = new CameraData { projection = data.projection, rotation = data.rotation, position = data.position, cx = data.cx, cy = data.cy, truckPosition = data.truckPosition, truckRotation = data.truckRotation, fov = data.fov };
@@ -79,9 +97,9 @@ public sealed class AutonomySupervisor : IDisposable
             catch (Exception ex)
             {
                 Logger.Error($"Autonomy supervisor: {ex.Message}");
-                if (ApplicationState.Current.EnableAssists) Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(Environment.TickCount64 + 500, 0.7f, null, "Autonomy sensor error; braking"));
+                if (ApplicationState.Current.EnableAssists) Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(Environment.TickCount64 + 500, 0, null, "Autonomy update unavailable", HasValidRoute: false));
             }
-            try { await Task.Delay(100, cancellation.Token); } catch (OperationCanceledException) { break; }
+            try { await Task.Delay(33, cancellation.Token); } catch (OperationCanceledException) { break; }
         }
     }
 
@@ -104,7 +122,10 @@ public sealed class AutonomySupervisor : IDisposable
         }
         if (!observation.HasForwardView) freshFrames = 0;
         if (!state.EnableAssists) { tracker.Clear(); freshFrames = 0; }
-        var obstacles = tracker.Confirmed(now).ToList();
+        // Screen detections are diagnostic observations. Native positions own
+        // automatic braking/merging; a mislocalized cone cannot stop the truck.
+        var visualObstacles = tracker.Confirmed(now);
+        var obstacles = new List<SceneObstacle>();
         bool freshTraffic = now - Interlocked.Read(ref trafficAt) < 500 && now - Interlocked.Read(ref parkedAt) < 500;
         freshTraffic &= (traffic?.vehicles.All(v => v.id == 0 || VehicleGeometry.IsValid(v) && float.IsFinite(v.speed)) ?? false) &&
                         (parked?.vehicles.All(v => v.id == 0 || VehicleGeometry.IsValid(v)) ?? false);
@@ -150,17 +171,28 @@ public sealed class AutonomySupervisor : IDisposable
             freshTraffic, visualFresh, telemetry.truckBool.blinkerLeftActive, telemetry.truckBool.blinkerRightActive,
             paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage, rig);
         var decision = planner.Decide(scene);
-        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, state.EnableAssists, decision.StoppingDistance));
+        float? signalStop = now - Interlocked.Read(ref gatesAt) < 500 ? RouteSnapshotBuilder.SignalStopDistance(path, scene, semaphores) : null;
+        var demand = cruise.Calculate(scene, state.DesiredSpeed, decision, signalStop);
+        tollNeedsPrompt = scene.ClosedGateId != null && scene.GateDistance < 12 && Math.Abs(scene.Speed) < 0.3f;
+        if (state.EnableAssists && ready && route.IsValid)
+            Events.Current.Publish(GameOutput.Current.EventString, new ControlEvent {
+                ChannelDefinition = cruiseChannel, Variables = new() { aforward = demand.Throttle, abackward = demand.Brake }
+            });
+        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, state.EnableAssists, decision.StoppingDistance, ready && route.IsValid));
         if (ready && state.EnableAssists && (decision.Signal != 0 || decision.PayToll))
         {
+            int requestedLane = decision.Signal < 0 ? route.LeftLane : route.RightLane;
+            bool nativeLaneRequested = decision.Signal != 0 && RouteSnapshotBuilder.RequestLaneChange(path,ego,route.Lane,requestedLane);
             Events.Current.Publish(GameOutput.Current.EventString, new ControlEvent
             {
                 ChannelDefinition = controls,
                 Properties = new() { BooleanType = ControlBooleanType.TrueToToggle },
-                Variables = new() { lblinker = decision.Signal < 0 ? true : null, rblinker = decision.Signal > 0 ? true : null, activate = decision.PayToll ? true : null }
+                Variables = new() { lblinker = !nativeLaneRequested && decision.Signal < 0 ? true : null,
+                    rblinker = !nativeLaneRequested && decision.Signal > 0 ? true : null, activate = decision.PayToll ? true : null }
             });
         }
-        status = new(decision.Status, observation.Status, obstacles.ToArray(), route, ego);
+        status = new(decision.Status, GameSettings.Current.EnableVisualRoadworkDiagnostics || tollNeedsPrompt ? observation.Status :
+            "Monitoring native traffic and parked vehicles", obstacles.Concat(visualObstacles).ToArray(), route, ego);
         if (now - lastUiAt >= 250)
         {
             lastUiAt = now;
@@ -207,9 +239,11 @@ public sealed class AutonomySupervisor : IDisposable
                 var telemetry = GameTelemetry.Current.GetCurrentData();
                 var runningGame = ApplicationState.Current.RunningGame;
                 var pose = camera;
-                bool active = ApplicationState.Current.EnableAssists && telemetry.sdkActive && !telemetry.paused && runningGame != null;
+                bool diagnostics = GameSettings.Current.EnableVisualRoadworkDiagnostics;
+                bool active = ApplicationState.Current.EnableAssists && telemetry.sdkActive && !telemetry.paused && runningGame != null && (diagnostics || tollNeedsPrompt);
                 if (!active)
                 {
+                    capture.Dispose();
                     if (idleSince == 0) idleSince = cycleStarted;
                     if (cycleStarted - idleSince > 30000 && neural == null)
                     {
@@ -243,6 +277,11 @@ public sealed class AutonomySupervisor : IDisposable
                             var centerWorld = center + new Vector3(pose.cx * 512, 0, pose.cy * 512);
                             if (centerWorld == null || Vector3.Dot(Vector3.Normalize(centerWorld.Value - ego), forward) < 0.8f)
                                 vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual perception requires a forward-facing camera" };
+                            else if (!diagnostics)
+                            {
+                                bool prompt = (promptReader ??= new TollPromptReader(assets)).Read(frame);
+                                vision = new(capturedAt, [], [], true, "Reading the toll payment prompt", prompt);
+                            }
                             else
                             {
                                 var fastStarted = Stopwatch.StartNew();
@@ -296,7 +335,7 @@ public sealed class AutonomySupervisor : IDisposable
         catch (Exception ex)
         {
             Logger.Error($"Visual perception unavailable: {ex}");
-            vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual detector unavailable; automatic passing suspended" };
+            vision = vision with { HasForwardView = false, TollPrompt = false, Status = "Visual diagnostics unavailable; native driving remains active" };
         }
         finally
         {

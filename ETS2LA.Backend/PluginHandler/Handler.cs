@@ -359,6 +359,11 @@ public class PluginHandler
 
     public bool EnablePlugin(IPlugin? plugin = null, string? pluginId = null)
     {
+        if (ETS2LA.Settings.PersonalDrivingProfile.IsEnabled && (plugin?.Info.Id ?? pluginId) == "tumppi066.adaptivecruisecontrol")
+        {
+            Logger.Info("The personal build uses its native cruise controller.");
+            return false;
+        }
         plugin ??= GetPluginById(pluginId!);
         if (plugin == null)
         {

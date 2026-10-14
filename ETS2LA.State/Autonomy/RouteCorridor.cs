@@ -63,11 +63,59 @@ public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int
     }
 }
 
-/// <summary>Read-only bridge to the installed PathLib API. No proprietary assembly is needed at build time.</summary>
+/// <summary>Bridge to the installed PathLib route and target-lane API. No proprietary assembly is needed at build time.</summary>
 public static class RouteSnapshotBuilder
 {
     private static T Field<T>(object instance, string name) => instance.GetType().GetField(name)?.GetValue(instance) is T value ? value : default!;
     private static object? Call(object instance, string method, Type[] signature, params object[] args) => instance.GetType().GetMethod(method, signature)?.Invoke(instance, args);
+
+    public static bool RequestLaneChange(object? data, Vector3 ego, int expectedLane, int targetLane)
+    {
+        try
+        {
+            if (data == null || Field<bool>(data,"HasError") || targetLane == 0 || Math.Sign(targetLane) != Math.Sign(expectedLane) || Math.Abs(targetLane-expectedLane) != 1) return false;
+            float factor = (float)(Call(data,"GetFactorForPoint",[typeof(Vector3)],ego) ?? float.NaN);
+            if (!float.IsFinite(factor)) return false;
+            var current = Call(data,"GetItemForFactor",[typeof(float)],Math.Clamp(factor,0.001f,0.999f));
+            if (current == null || Field<int>(current,"laneIndex") != expectedLane || !Field<bool>(current,"allowedToLaneChange") ||
+                Field<IParsedItem>(current,"item") is not ParsedRoad and not ParsedRoadList ||
+                Field<IList>(data,"PlannedPath") is not { } path || !path.Contains(current)) return false;
+            var from = Call(current,"GetLane",[typeof(int)],expectedLane) as Tuple<Side,int>;
+            var to = Call(current,"GetLane",[typeof(int)],targetLane) as Tuple<Side,int>;
+            if (from == null || to == null || from.Item1 != to.Item1) return false;
+            var target = current.GetType().GetField("targetLaneIndex");
+            int pending = target?.GetValue(current) is int value ? value : int.MinValue;
+            if (pending != 0 && pending != targetLane) return false;
+            // This is the installed planner's supported target-lane field. Its
+            // normal tick owns curve generation, indicators and completion.
+            target!.SetValue(current,targetLane);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    public static float? SignalStopDistance(object? path, DrivingScene scene, ETS2LA.Game.SDK.SemaphoreData? live)
+    {
+        try
+        {
+            if (path == null || live == null || !scene.Route.IsValid ||
+                Call(path, "GetNextSemaphores", [typeof(Vector3)], scene.Ego) is not IEnumerable<ParsedSemaphore> signals) return null;
+            float along = scene.Route.Project(scene.Ego).Along, nearest = float.PositiveInfinity;
+            foreach (var signal in signals)
+            {
+                var placed = signal.GetWorldOrientedPoint().Position;
+                var actual = live.semaphores.Where(s => s.type == ETS2LA.Game.SDK.SemaphoreType.TRAFFICLIGHT &&
+                    s.id == signal.Semaphore.SemaphoreId && Vector3.Distance(s.GetWorldCoordinates(), placed) < 10).FirstOrDefault();
+                if (actual == null) continue;
+                float distance = scene.Route.Project(signal.GetCurveStartWorldCoordinates().Position).Along - along - 4;
+                bool stop = actual.state is (int)ETS2LA.Game.SDK.TrafficLightState.RED or (int)ETS2LA.Game.SDK.TrafficLightState.ORANGETOGREEN;
+                stop |= actual.state == (int)ETS2LA.Game.SDK.TrafficLightState.ORANGETORED && distance > scene.Speed * scene.Speed / 6 + 5;
+                if (stop && distance > -2 && distance < 200) nearest = Math.Min(nearest, Math.Max(0, distance));
+            }
+            return float.IsFinite(nearest) ? nearest : null;
+        }
+        catch { return null; }
+    }
 
     public static RouteCorridor Build(object? data, Vector3 ego)
     {
