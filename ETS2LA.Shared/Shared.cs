@@ -104,6 +104,7 @@ public abstract class Plugin : IPlugin
     /// </summary>
     protected void RunningThread()
     {
+        string pluginId = Info.Id;
         var sw = System.Diagnostics.Stopwatch.StartNew();
         double interval = 1000.0 / TickRate; // ms per tick
         double next = sw.Elapsed.TotalMilliseconds;
@@ -114,7 +115,7 @@ public abstract class Plugin : IPlugin
             interval = 1000.0 / TickRate;
 
             next += interval;
-            try { Tick(); }
+            try { using var execution = PluginExecutionContext.Enter(pluginId); Tick(); }
             catch (Exception ex)
             {
                 Logger.Error(_("Error in plugin {0} Tick: {1}", Info.Name, ex.Message));

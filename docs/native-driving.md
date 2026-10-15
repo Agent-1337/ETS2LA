@@ -56,6 +56,33 @@ They request Windows' borderless-capture permission. If permission is unavailabl
 capture remains off rather than falling back to a yellow-bordered session; an
 unreadable toll prompt requires manual payment.
 
+## Wider turns
+
+The tractor's steering path now shifts toward the outside before a bend, remains
+outside through the turn and comes back gradually after the trailer has passed.
+The required extra radius is estimated from the measured axle/hitch spans, body
+width and road curvature. A longer articulated combination can need an offset on
+a broad bend where a shorter truck needs none. Preparation distance also grows
+with rig length and speed; a late activation limits the initial target step.
+
+The offset is capped at 2 m. Road lane centers bound the available space on the
+same side of circulation; junctions use the more restrictive entry/exit bounds.
+Native traffic, closing vehicles and stream coverage restrict any space borrowed
+outside the current lane. Missing trailer geometry or traffic coverage retains
+only the estimated clearance inside the lane. Unknown road width uses a narrower
+fallback. These are map-based lane estimates, not curb or street-furniture scans.
+
+Only Lane Assist's synchronous map sampling sees the adjusted targets. Map
+extraction, route selection and lane-change geometry retain their base coordinates;
+the existing steering controller follows the new points. The supervisor's displayed
+route and cruise curvature checks use the adjusted trajectory. Lane changes,
+reverse and manual driving suspend the widening.
+
+Junction progress is projected onto the actual interpolated curves instead of a
+straight chord between their ends. This prevents a curved intersection from
+misplacing the truck along the steering path. Forward and backward path layouts,
+including multiple connected curves, have round-trip regression tests.
+
 ## What the ATS files establish, and the remaining gap
 
 Read-only inspection of `C:\Games\American Truck Simulator\def.scs` on
@@ -84,7 +111,7 @@ recorded and in-game validation. This build is not proven 100% autonomous.
 
 ## Offline verification
 
-- 138 regression tests passed, including native merges without vision, occupied
+- 154 regression tests passed, including native merges without vision, occupied
   destination lanes, trailer geometry, quaternion conversion, snapshot ownership,
   signal stops, readiness/handover and the actual SDK Jake-brake hold/release.
 - A second-process probe with isolated test memory maps verified emergency braking
@@ -96,6 +123,16 @@ recorded and in-game validation. This build is not proven 100% autonomous.
   and native cruise. This excludes map-route construction, UI rendering and the
   live game; it is not an in-game FPS measurement. The light geometry work runs on
   CPU; optional neural diagnostics retain DirectML GPU execution.
+- The wider-turn revision's separate benchmark, also 1,000 iterations with 40
+  objects and 141 route points, measured **0.643 ms median / 1.221 ms p95 per
+  synthetic frame** for turn planning, native cruise, scoped steering sampling
+  and curved-junction projection. It excludes map-route construction, SDK reads,
+  the actual steering PID and game physics.
+- A simple kinematic trailer model on a 25 m right turn with a 12 m trailer axle
+  span reduced the maximum inward axle displacement from **2.85 m to 0.69 m**.
+  This verifies the geometric effect of the targets; it is not an ATS driving or
+  curb-collision measurement. Tests also cover mirrored left turns, early outside
+  placement, tail clearance, lane boundaries and occupied/closing adjacent traffic.
 - The user explicitly requested continuing without in-game validation. Acceptance
   by a running game's native planner, real obstacle coverage and the complete toll
   flow have not been verified in this revision.

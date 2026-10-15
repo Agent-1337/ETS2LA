@@ -361,7 +361,7 @@ public class ParsedRoad : IParsedItem
         Vector3 normal = Vector3.Normalize(Vector3.Transform(Vector3.UnitX, point.Rotation));
         point.Position = point.Position + normal * -(offset + additionalOffset);
 
-        return point;
+        return SteeringTrajectory.Adjust(point);
     }
 
     /// <summary>
@@ -791,7 +791,7 @@ public class ParsedRoadList : IParsedItem
         Vector3 normal = Vector3.Normalize(Vector3.Transform(Vector3.UnitX, point.Rotation));
         point.Position = point.Position + normal * -(offset + additionalOffset);
 
-        return point;
+        return SteeringTrajectory.Adjust(point);
     }
 
     /// <summary>
@@ -1139,7 +1139,7 @@ public class PrefabPath
                     point.Position += normal * additionalOffset;
                 }
 
-                return point;
+                return SteeringTrajectory.Adjust(point);
             }
             if (CurveDirection == Direction.Forward)
                 distCovered += curve.Length;
@@ -1170,48 +1170,32 @@ public class PrefabPath
     /// <returns>Factor from 0-1 along the path.</returns>
     public float GetFactorForPoint(Vector3 point)
     {
-        if (Length <= 0) return 0;
-
-        float minDistanceSq = float.MaxValue;
-        float closestDistAlongPath = 0;
-        float cumulativeDist = 0;
-
-        IEnumerable<NavCurve> curvesToConsider = Curves;
-        if (CurveDirection == Direction.Backward) curvesToConsider = curvesToConsider.Reverse();
-
-        foreach (var curve in curvesToConsider)
+        if (!float.IsFinite(Length) || Length <= 0 || Curves.Count == 0) return 0;
+        // A chord across a curved junction misplaces the truck's progress and
+        // starts steering from the wrong part of the turn. Project onto the same
+        // interpolated geometry the controller actually follows, in either direction.
+        int segments = Math.Clamp((int)Math.Ceiling(Length / 3), 16, 128);
+        float best = 0, minimum = float.PositiveInfinity;
+        Vector3 PositionAt(float factor) => InterpolateDist(Length * Math.Clamp(factor,0.000001f,0.999999f))!.Value.Position;
+        Vector3 previous = PositionAt(0);
+        for (int i = 1; i <= segments; i++)
         {
-            Vector3 startPos = Vector3.Transform(curve.StartPosition + prefabStart, rotationMatrix);
-            Vector3 endPos = Vector3.Transform(curve.EndPosition + prefabStart, rotationMatrix);
-
-            Vector3 line = endPos - startPos;
-            float lineLenSq = line.LengthSquared();
-            
-            float t = 0;
-            if (lineLenSq > 0)
-            {
-                t = Vector3.Dot(point - startPos, line) / lineLenSq;
-                t = Math.Clamp(t, 0, 1);
-            }
-
-            Vector3 closestPointOnSegment = startPos + (line * t);
-            float distSq = Vector3.DistanceSquared(point, closestPointOnSegment);
-
-            if (distSq < minDistanceSq)
-            {
-                minDistanceSq = distSq;
-
-                float curveT = (CurveDirection == Direction.Backward) ? (1 - t) : t;
-                closestDistAlongPath = cumulativeDist + (curveT * curve.Length);
-            }
-
-            cumulativeDist += curve.Length;
+            Vector3 next = PositionAt(i / (float)segments);
+            var delta = next - previous;
+            float t = delta.LengthSquared() > 0.0001f ? Math.Clamp(Vector3.Dot(point - previous, delta) / delta.LengthSquared(), 0, 1) : 0;
+            float distance = Vector3.DistanceSquared(point, previous + delta * t);
+            if (distance < minimum) { minimum = distance; best = (i - 1 + t) / segments; }
+            previous = next;
         }
-
-        float finalT = Math.Clamp(closestDistAlongPath / Length, 0, 1);
-        if (CurveDirection == Direction.Backward)
-            finalT = 1 - finalT;
-        return finalT;
+        float low = Math.Max(0, best - 1f / segments), high = Math.Min(1, best + 1f / segments);
+        for (int i = 0; i < 12; i++)
+        {
+            float a = low + (high - low) / 3, b = high - (high - low) / 3;
+            float da = Vector3.DistanceSquared(point, PositionAt(a));
+            float db = Vector3.DistanceSquared(point, PositionAt(b));
+            if (da < db) high = b; else low = a;
+        }
+        return (low + high) / 2;
     }
 }
 

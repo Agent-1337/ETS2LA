@@ -6,7 +6,9 @@ using TruckLib;
 
 namespace ETS2LA.State.Autonomy;
 
-public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int RightLane, float LeftOffset, float RightOffset, bool LaneChangeInProgress, float LaneChangeAvailableDistance = float.PositiveInfinity)
+public sealed record RoadEnvelope(Vector3 Position, float Left, float Right, float LaneWidth);
+
+public sealed record RouteCorridor(Vector3[] Points, int Lane, int LeftLane, int RightLane, float LeftOffset, float RightOffset, bool LaneChangeInProgress, float LaneChangeAvailableDistance = float.PositiveInfinity, RoadEnvelope[]? RoadEnvelopes = null)
 {
     public static RouteCorridor Empty { get; } = new([], 0, 0, 0, 0, 0, false);
     public bool IsValid => Points.Length > 2;
@@ -127,8 +129,14 @@ public static class RouteSnapshotBuilder
             float factor = (float)(Call(data, "GetFactorForPoint", [typeof(Vector3)], ego) ?? 0f);
             float egoDistance = Math.Clamp(factor, 0, 1) * total;
             var points = new List<Vector3>();
+            var envelopes = new List<RoadEnvelope>();
+            var envelopeCache = new Dictionary<object,RoadEnvelope?>();
             for (float distance = Math.Max(0.05f, egoDistance - 60); distance < Math.Min(total - 0.05f, egoDistance + 280); distance += 3)
-                if (Call(data, "InterpolateDist", [typeof(float), typeof(float), typeof(bool)], distance, 0f, false) is OrientedPoint p && float.IsFinite(p.Position.X + p.Position.Y + p.Position.Z)) points.Add(p.Position);
+                if (Call(data, "InterpolateDist", [typeof(float), typeof(float), typeof(bool)], distance, 0f, false) is OrientedPoint p && float.IsFinite(p.Position.X + p.Position.Y + p.Position.Z))
+                {
+                    points.Add(p.Position);
+                    envelopes.Add(EnvelopeAt(items, distance, p.Position, envelopeCache));
+                }
             if (points.Count < 3) return RouteCorridor.Empty;
             var current = Call(data, "GetItemForFactor", [typeof(float)], Math.Clamp(factor, 0.001f, 0.999f));
             if (current == null) return RouteCorridor.Empty;
@@ -168,8 +176,70 @@ public static class RouteSnapshotBuilder
                 return a is OrientedPoint pa && b is OrientedPoint pb ? Vector3.Distance(pa.Position, pb.Position) : 0;
             }
             float lw = Available(left) ? Width(left) : 0, rw = Available(right) ? Width(right) : 0;
-            return new(points.ToArray(), lane, lw is >= 2.5f and <= 5 ? left : 0, rw is >= 2.5f and <= 5 ? right : 0, -lw, rw, target != 0, nativeAvailable);
+            return new(points.ToArray(), lane, lw is >= 2.5f and <= 5 ? left : 0, rw is >= 2.5f and <= 5 ? right : 0, -lw, rw, target != 0, nativeAvailable, envelopes.ToArray());
         }
         catch (Exception) { return RouteCorridor.Empty; }
+    }
+
+    private static RoadEnvelope EnvelopeAt(IList items, float distance, Vector3 position, Dictionary<object,RoadEnvelope?> cache)
+    {
+        float covered = 0;
+        for (int i = 0; i < items.Count; i++)
+        {
+            var item = items[i];
+            if (item == null) continue;
+            float length = (float)(Call(item,"GetLength",[]) ?? 0f);
+            if (distance > covered + length) { covered += length; continue; }
+            if (Field<IParsedItem>(item,"item") is ParsedRoad or ParsedRoadList)
+                return Cached(item,position) is { } bounds ? bounds with {Position=position} : new(position,1.75f,1.75f,3.5f);
+            // Junctions inherit the entry/exit road's available lane space. Do
+            // not infer asphalt or opposing-lane clearance from the turn radius.
+            object? before = i > 0 ? items[i-1] : Field<object>(item,"lastItem");
+            object? after = i+1 < items.Count ? items[i+1] : null;
+            var entry = before == null ? null : Cached(before,null,end:true);
+            var exit = after == null ? null : Cached(after,null,end:false);
+            if (entry == null || exit == null) return new(position,1.75f,1.75f,3.5f);
+            return new(position,Math.Min(entry.Left,exit.Left),Math.Min(entry.Right,exit.Right),Math.Min(entry.LaneWidth,exit.LaneWidth));
+        }
+        return new(position,1.75f,1.75f,3.5f);
+
+        RoadEnvelope? Cached(object item,Vector3? at,bool end=false)
+        {
+            if (!cache.TryGetValue(item,out var result)) { result=RoadEnvelopeFor(item,at,end);cache[item]=result; }
+            return result;
+        }
+    }
+
+    private static RoadEnvelope? RoadEnvelopeFor(object item, Vector3? position, bool end = false)
+    {
+        try
+        {
+            var road = Field<IParsedItem>(item,"item");
+            if (road is not ParsedRoad and not ParsedRoadList || Field<int>(item,"targetLaneIndex") != 0) return null;
+            int lane = Field<int>(item,"laneIndex");
+            if (lane == 0) return null;
+            var side = lane > 0 ? Side.Right : Side.Left;
+            int index = Math.Abs(lane)-1, count = (int)(Call(road,"GetLaneCount",[typeof(Side)],side) ?? 0);
+            if (count < 1 || count > 12 || index >= count) return null;
+            int step = Field<Direction>(item,"direction") == Direction.Forward ? 1 : -1;
+            float t = position is Vector3 at ? (float)(Call(item,"GetFactorFor",[typeof(Vector3)],at) ?? 0.5f) : end == (step > 0) ? 0.99f : 0.01f;
+            t = Math.Clamp(t,0.01f,0.99f);
+            var signature = new[] {typeof(float),typeof(Side),typeof(int),typeof(float)};
+            if (Call(road,"InterpolateLane",signature,t,side,index,0f) is not OrientedPoint center ||
+                Call(road,"InterpolateLane",signature,t+step*0.005f,side,index,0f) is not OrientedPoint ahead) return null;
+            var forward = ahead.Position-center.Position; forward.Y=0;
+            if (forward.LengthSquared()<0.0001f) return null;
+            forward=Vector3.Normalize(forward); var right=new Vector3(forward.Z,0,-forward.X);
+            float leftExtent=0,rightExtent=0,width=4.5f;
+            foreach (int candidate in Enumerable.Range(0,count))
+                if (Call(road,"InterpolateLane",signature,t,side,candidate,0f) is OrientedPoint other)
+                {
+                    float lateral=Vector3.Dot(other.Position-center.Position,right);
+                    leftExtent=Math.Max(leftExtent,-lateral); rightExtent=Math.Max(rightExtent,lateral);
+                    if(candidate!=index && Math.Abs(lateral) is >= 2.5f and <= 5) width=Math.Min(width,Math.Abs(lateral));
+                }
+            return new(center.Position,leftExtent+width/2,rightExtent+width/2,width);
+        }
+        catch { return null; }
     }
 }

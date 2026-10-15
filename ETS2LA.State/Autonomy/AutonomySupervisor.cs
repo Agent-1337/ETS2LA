@@ -8,6 +8,7 @@ using ETS2LA.Game.Telemetry;
 using ETS2LA.Logging;
 using TruckLib;
 using ETS2LA.Game;
+using ETS2LA.Game.Data;
 
 namespace ETS2LA.State.Autonomy;
 
@@ -171,8 +172,10 @@ public sealed class AutonomySupervisor : IDisposable
             freshTraffic, visualFresh, telemetry.truckBool.blinkerLeftActive, telemetry.truckBool.blinkerRightActive,
             paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage, rig);
         var decision = planner.Decide(scene);
+        var turn = decision.Signal == 0 ? WideTurnPlanner.Build(scene) : new WideTurnPlan(route,null,0);
+        SteeringTrajectory.Publish(turn.Frame);
         float? signalStop = now - Interlocked.Read(ref gatesAt) < 500 ? RouteSnapshotBuilder.SignalStopDistance(path, scene, semaphores) : null;
-        var demand = cruise.Calculate(scene, state.DesiredSpeed, decision, signalStop);
+        var demand = cruise.Calculate(scene with {Route=turn.Route}, state.DesiredSpeed, decision, signalStop);
         tollNeedsPrompt = scene.ClosedGateId != null && scene.GateDistance < 12 && Math.Abs(scene.Speed) < 0.3f;
         if (state.EnableAssists && ready && route.IsValid)
             Events.Current.Publish(GameOutput.Current.EventString, new ControlEvent {
@@ -191,8 +194,9 @@ public sealed class AutonomySupervisor : IDisposable
                     rblinker = !nativeLaneRequested && decision.Signal > 0 ? true : null, activate = decision.PayToll ? true : null }
             });
         }
-        status = new(decision.Status, GameSettings.Current.EnableVisualRoadworkDiagnostics || tollNeedsPrompt ? observation.Status :
-            "Monitoring native traffic and parked vehicles", obstacles.Concat(visualObstacles).ToArray(), route, ego);
+        status = new(turn.IsActive && decision.Status == "Monitoring traffic and roadworks" ? "Taking a wider arc for trailer clearance" : decision.Status,
+            GameSettings.Current.EnableVisualRoadworkDiagnostics || tollNeedsPrompt ? observation.Status :
+            "Monitoring native traffic and parked vehicles", obstacles.Concat(visualObstacles).ToArray(), turn.Route, ego);
         if (now - lastUiAt >= 250)
         {
             lastUiAt = now;
@@ -350,6 +354,7 @@ public sealed class AutonomySupervisor : IDisposable
     {
         if (!started || cancellation.IsCancellationRequested) return;
         cancellation.Cancel();
+        SteeringTrajectory.Publish(null);
         Events.Current.Unsubscribe<object>("Pathfinding.PlannedPathData", OnPath);
         Events.Current.Unsubscribe(TrafficProvider.Current.EventString, (Action<TrafficData>)OnTraffic);
         Events.Current.Unsubscribe(ParkedVehiclesProvider.Current.EventString, (Action<ParkedVehicleData>)OnParked);
