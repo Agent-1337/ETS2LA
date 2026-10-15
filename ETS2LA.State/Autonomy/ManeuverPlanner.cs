@@ -36,17 +36,22 @@ public sealed class ManeuverPlanner
         bypassed.Clear(); rememberedHazard = null; rememberedMarkers = []; longestRig = 0;
     }
 
-    public ManeuverDecision Decide(DrivingScene scene)
+    public ManeuverDecision Decide(DrivingScene scene, bool automaticPassing = true)
     {
         if (!scene.Enabled) { Reset(); return new("Manual driving"); }
         if (!scene.Ready) return new("Waiting for live game data", 0.65f);
-        if (handover != null) return new(handover, 0.7f);
         if (!float.IsFinite(scene.Speed + scene.SpeedLimit + scene.RigLength) || scene.RigLength is < 1 or > 120) return new("Invalid vehicle telemetry; braking", 0.7f);
         if (!scene.Route.IsValid) return new("Waiting for a valid route", 0.65f);
         if (scene.Speed < -0.1f) return new("Automatic maneuvers suspended in reverse");
         if (scene.ClosedGateId is int gate && scene.GateDistance is > 0 and < 45)
             return Toll(scene, gate);
         tollGate = null; tollAttempts = 0; tollStationarySince = lastPayment = 0; tollConfirmed = false;
+        if (!automaticPassing)
+        {
+            Reset();
+            return new("Monitoring native traffic", SpeedCap: RigTurnGuard.SpeedCap(scene));
+        }
+        if (handover != null) return new(handover, 0.7f);
         if (passing) { longestRig = Math.Max(longestRig, scene.RigLength); UpdateBypassZone(scene); }
 
         if (targetLane != 0)

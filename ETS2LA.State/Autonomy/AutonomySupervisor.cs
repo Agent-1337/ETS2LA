@@ -109,7 +109,7 @@ public sealed class AutonomySupervisor : IDisposable
         long now = Environment.TickCount64;
         var telemetry = GameTelemetry.Current.GetCurrentData();
         var state = ApplicationState.Current;
-        bool ready = telemetry.sdkActive && !telemetry.paused && now - Interlocked.Read(ref pathAt) < 1000;
+        bool ready = GameTelemetry.Current.Activity.IsLive(now) && !telemetry.paused && now - Interlocked.Read(ref pathAt) < 1000;
         var ego = telemetry.truckPlacement.coordinate.ToVector3();
         var route = ready ? RouteSnapshotBuilder.Build(path, ego) : RouteCorridor.Empty;
         if (!state.EnableAssists || !telemetry.sdkActive) routeHistory.Clear();
@@ -171,7 +171,10 @@ public sealed class AutonomySupervisor : IDisposable
         var scene = new DrivingScene(now, state.EnableAssists, ready, ego, telemetry.truckFloat.speed, rigLength, route, obstacles,
             freshTraffic, visualFresh, telemetry.truckBool.blinkerLeftActive, telemetry.truckBool.blinkerRightActive,
             paidAt > 0 && now - paidAt < 8000, gateId, gateDistance, observation.TollPrompt, telemetry.truckFloat.speedLimit, trafficCoverage, rig);
-        var decision = planner.Decide(scene);
+        // Experimental bypass cannot seize the pedals or leave a remembered
+        // obstacle latched in the stable personal profile. Native following,
+        // signals, tolls and the turn guard remain active.
+        var decision = planner.Decide(scene, GameSettings.Current.EnableAutomaticObstaclePassing);
         var turn = decision.Signal == 0 ? WideTurnPlanner.Build(scene) : new WideTurnPlan(route,null,0);
         SteeringTrajectory.Publish(turn.Frame);
         float? signalStop = now - Interlocked.Read(ref gatesAt) < 500 ? RouteSnapshotBuilder.SignalStopDistance(path, scene, semaphores) : null;
@@ -181,7 +184,9 @@ public sealed class AutonomySupervisor : IDisposable
             Events.Current.Publish(GameOutput.Current.EventString, new ControlEvent {
                 ChannelDefinition = cruiseChannel, Variables = new() { aforward = demand.Throttle, abackward = demand.Brake }
             });
-        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, decision.Status, state.EnableAssists, decision.StoppingDistance, ready && route.IsValid));
+        string action = demand.Reason ?? (turn.IsActive && decision.Status is "Monitoring traffic and roadworks" or "Monitoring native traffic" ?
+            "Taking a wider arc for trailer clearance" : decision.Status);
+        Events.Current.Publish(DrivingEnvelope.Event, new DrivingEnvelope(now + 600, decision.Brake, decision.SpeedCap, action, state.EnableAssists, demand.StoppingDistance, ready && route.IsValid));
         if (ready && state.EnableAssists && (decision.Signal != 0 || decision.PayToll))
         {
             int requestedLane = decision.Signal < 0 ? route.LeftLane : route.RightLane;
@@ -194,7 +199,7 @@ public sealed class AutonomySupervisor : IDisposable
                     rblinker = !nativeLaneRequested && decision.Signal > 0 ? true : null, activate = decision.PayToll ? true : null }
             });
         }
-        status = new(turn.IsActive && decision.Status == "Monitoring traffic and roadworks" ? "Taking a wider arc for trailer clearance" : decision.Status,
+        status = new(action,
             GameSettings.Current.EnableVisualRoadworkDiagnostics || tollNeedsPrompt ? observation.Status :
             "Monitoring native traffic and parked vehicles", obstacles.Concat(visualObstacles).ToArray(), turn.Route, ego);
         if (now - lastUiAt >= 250)

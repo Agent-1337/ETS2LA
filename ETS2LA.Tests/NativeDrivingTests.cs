@@ -206,13 +206,13 @@ public sealed class NativeDrivingTests
     {
         using var map=MemoryMappedFile.CreateNew(null,1024); using var buffer=map.CreateViewAccessor();
         var output=(GameOutput)RuntimeHelpers.GetUninitializedObject(typeof(GameOutput));
-        Set("personalBuild",true); Set("legacyAccessor",buffer);
+        Set("personalBuild",true); Set("legacyAccessor",buffer); Set("engineBrake",new EngineBrakePolicy());
         int offset=0; var offsets=new Dictionary<string,int>();
         foreach(var field in typeof(ControlVariables).GetFields()) {offsets[field.Name]=offset;offset+=field.FieldType==typeof(bool?)?1:4;}
         Set("legacyShmOffsets",offsets);
         var data=new GameTelemetryData();data.truckFloat.speed=20;data.truckFloat.engineRpm=1400;data.truckBool.engineEnabled=true;
         Apply(-0.6f,true); Assert.True(buffer.ReadBoolean(offsets["motorbrake"])); Assert.False(buffer.ReadBoolean(offsets["engbraketog"]));
-        Apply(1,true); Assert.False(buffer.ReadBoolean(offsets["motorbrake"]));
+        Apply(1,true); Assert.True(buffer.ReadBoolean(offsets["motorbrake"])); // Short speed noise cannot release it.
         Apply(-0.6f,false); Assert.False(buffer.ReadBoolean(offsets["motorbrake"]));
         void Set(string field,object value)=>typeof(GameOutput).GetField(field,BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(output,value);
         void Apply(float pedal,bool active)=>typeof(GameOutput).GetMethod("ApplyEngineBrake",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(output,[pedal,data,active]);

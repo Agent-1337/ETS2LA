@@ -8,6 +8,7 @@ public class GameSettings
     public List<string> ManualGamePaths { get; set; } = new();
     public bool EnableModernOutputForPedals { get; set; } = false;
     public bool EnableVisualRoadworkDiagnostics { get; set; } = false;
+    public bool EnableAutomaticObstaclePassing { get; set; } = false;
 
     [NonSerialized]
     private static readonly Lazy<GameSettings> _instance = new(() => new GameSettings(loadSettings: true));
@@ -27,6 +28,7 @@ public class GameSettings
                 ManualGamePaths = loadedSettings.ManualGamePaths;
                 EnableModernOutputForPedals = loadedSettings.EnableModernOutputForPedals;
                 EnableVisualRoadworkDiagnostics = loadedSettings.EnableVisualRoadworkDiagnostics;
+                EnableAutomaticObstaclePassing = loadedSettings.EnableAutomaticObstaclePassing;
             }
         }
     }

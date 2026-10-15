@@ -33,6 +33,11 @@ public class GameTelemetry
     public bool ReadTrailerData { get; set; } = false;
     private long lastFreshFrameAt;
     public long LastFreshFrameAt => Interlocked.Read(ref lastFreshFrameAt);
+    private readonly TelemetryFrameClock frameClock = new();
+    private TelemetryActivity activity = TelemetryActivity.Empty;
+    public TelemetryActivity Activity => Volatile.Read(ref activity);
+    private long lastProcessCheck;
+    private bool producerPresent;
 
     string mmapName = "Local\\SCSTelemetry";
     string mmapNameLinux = "/dev/shm/SCSTelemetry";
@@ -300,6 +305,7 @@ public class GameTelemetry
         if (!TryOpenMemory())
         {
             currentData.sdkActive = false;
+            Volatile.Write(ref activity, frameClock.Observe(Environment.TickCount64, false, false, false, 0, 0, 0));
             return;
         }
 
@@ -325,7 +331,6 @@ public class GameTelemetry
         offset += 3; // Padding
 
         ulong sdkTime = reader.ReadLongLong(offset); offset += 8;
-        if (currentData.sdkActive && sdkTime != currentData.time) Interlocked.Exchange(ref lastFreshFrameAt, Environment.TickCount64);
         currentData.time = sdkTime;
         currentData.simulatedTime = reader.ReadLongLong(offset); offset += 8;
         currentData.renderTime = reader.ReadLongLong(offset); offset += 8;
@@ -664,6 +669,21 @@ public class GameTelemetry
             ReadTrailer(offset, buffer, 5, currentData);
         }
 
+        // Commit freshness after the complete frame has been decoded. A reader
+        // can keep a Windows mapping alive after its producer exits; sdkActive
+        // alone is consequently not proof that the game is still running.
+        long now = Environment.TickCount64;
+        if (now - lastProcessCheck >= 500)
+        {
+            lastProcessCheck = now;
+            producerPresent = IsProducerRunning();
+        }
+        currentData.sdkActive &= producerPresent;
+        var observed = frameClock.Observe(now, currentData.sdkActive, currentData.paused, producerPresent,
+            currentData.time, currentData.simulatedTime, currentData.renderTime);
+        Interlocked.Exchange(ref lastFreshFrameAt, observed.AdvancedAt);
+        Volatile.Write(ref activity, observed);
+
         // Publish to the event bus
         Events.Current.Publish<GameTelemetryData>(EventString, currentData);
         TelemetryEvents.Current.UpdateEvents(currentData);
@@ -679,5 +699,17 @@ public class GameTelemetry
     public void Shutdown()
     {
         shutdown = true;
+    }
+
+    private static bool IsProducerRunning()
+    {
+        foreach (string name in new[] { "amtrucks", "eurotrucks2" })
+        {
+            var processes = Process.GetProcessesByName(name);
+            bool exists = processes.Length > 0;
+            foreach (var process in processes) process.Dispose();
+            if (exists) return true;
+        }
+        return false;
     }
 }

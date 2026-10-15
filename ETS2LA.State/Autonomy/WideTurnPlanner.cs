@@ -8,7 +8,7 @@ public sealed record WideTurnPlan(RouteCorridor Route, SteeringTrajectoryFrame? 
     public bool IsActive => Frame != null;
 }
 
-/// <summary>Pre-position the tractor outside a bend and retain clearance until the articulated rig has passed.</summary>
+/// <summary>Delay tight-corner turn-in within a verified same-direction corridor, then retain trailer clearance.</summary>
 public static class WideTurnPlanner
 {
     public static WideTurnPlan Build(DrivingScene scene)
@@ -27,7 +27,7 @@ public static class WideTurnPlanner
         for(int i=2;i<count-2;i++)
         {
             var u=Horizontal(points[i]-points[i-2]); var v=Horizontal(points[i+2]-points[i]);
-            if(u.Length()<2 || v.Length()<2) continue;
+            if(u.Length()<0.2f || v.Length()<0.2f) continue;
             curvature[i]=MathF.Atan2(u.X*v.Y-u.Y*v.X,Vector2.Dot(u,v))/((u.Length()+v.Length())/2);
             if(Math.Abs(curvature[i])>=0.0001f)
             {
@@ -38,6 +38,10 @@ public static class WideTurnPlanner
         float egoAlong=route.Project(scene.Ego).Along, egoOffset=route.Project(scene.Ego).Lateral;
         float prepare=Math.Clamp(rig.Length*0.8f+Math.Max(0,scene.Speed)*2.5f,35,90);
         float hold=Math.Clamp(rig.Length+6,18,125), release=Math.Clamp(rig.Length*0.45f,15,35);
+        var corners=FindCorners(points,along,curvature,rig,Envelope);
+        var cornerSamples=new bool[count];
+        foreach(var corner in corners)
+            for(int j=corner.Start;j<=corner.End;j++) cornerSamples[j]=true;
         var offsets=new float[count]; var lowerBounds=new float[count]; var upperBounds=new float[count];
         var obstacles=scene.Obstacles.Where(o=>!ObstructionEvidence.IsVisual(o) && ObstructionEvidence.SameRoadSurface(o,scene))
             .Select(o=>(Obstacle:o,P:route.Project(o.Position))).ToArray();
@@ -50,7 +54,7 @@ public static class WideTurnPlanner
             for(int j=2;j<count-2;j++)
             {
                 float delta=along[j]-along[i], k=curvature[j];
-                if(delta>prepare || delta < -hold-release || Math.Abs(k)<0.0001f) continue;
+                if(cornerSamples[j] || delta>prepare || delta < -hold-release || Math.Abs(k)<0.0001f) continue;
                 // Extra tractor radius needed to keep the final axle on the
                 // nominal curve in the steady-turn model. Rig length separately
                 // determines how early to prepare and when to release the offset.
@@ -60,9 +64,20 @@ public static class WideTurnPlanner
                 float candidate=Math.Sign(k)*need*weight;
                 if(Math.Abs(candidate)>Math.Abs(desired)) desired=candidate;
             }
+            foreach(var corner in corners)
+            {
+                float distance=along[i], start=along[corner.Start], end=along[corner.End];
+                if(distance<start-prepare || distance>end+hold+release) continue;
+                float angle=corner.Angles[Math.Clamp(i-corner.Start,0,corner.Angles.Length-1)];
+                float weight=distance<start ? Smooth(1-(start-distance)/prepare) : distance<=end+hold ? 1 : Smooth(1-(distance-end-hold)/release);
+                float candidate=corner.Sign*DelayedOffset(corner,angle)*weight;
+                if(Math.Abs(candidate)>Math.Abs(desired)) desired=candidate;
+            }
             float Available(float extent,int side)
             {
-                float available=Math.Clamp(extent-rig.HalfWidth-0.3f,0,2);
+                // At most one lane of the same carriageway. Unknown coverage
+                // still restricts the trajectory to the current lane's width.
+                float available=Math.Clamp(extent-rig.HalfWidth-0.3f,0,4.5f);
                 if(!scene.TrafficFresh || !scene.MergeCoverage || !rig.HasLiveTail) return Math.Min(available,own);
                 float seconds=Math.Max(0,along[i]-egoAlong)/Math.Max(3,scene.Speed);
                 foreach(var (obstacle,p) in obstacles)
@@ -91,8 +106,18 @@ public static class WideTurnPlanner
         // transition. This is a swept arc rather than a last-moment steering kick.
         for(int pass=0;pass<2;pass++)
         {
-            for(int i=1;i<count;i++) offsets[i]=Math.Clamp(offsets[i],offsets[i-1]-0.1f*(along[i]-along[i-1]),offsets[i-1]+0.1f*(along[i]-along[i-1]));
-            for(int i=count-2;i>=0;i--) offsets[i]=Math.Clamp(offsets[i],offsets[i+1]-0.1f*(along[i+1]-along[i]),offsets[i+1]+0.1f*(along[i+1]-along[i]));
+            for(int i=1;i<count;i++)
+            {
+                float slope=cornerSamples[i] && cornerSamples[i-1] ? 0.25f : 0.1f;
+                float reach=slope*(along[i]-along[i-1]);
+                offsets[i]=Math.Clamp(offsets[i],offsets[i-1]-reach,offsets[i-1]+reach);
+            }
+            for(int i=count-2;i>=0;i--)
+            {
+                float slope=cornerSamples[i] && cornerSamples[i+1] ? 0.25f : 0.1f;
+                float reach=slope*(along[i+1]-along[i]);
+                offsets[i]=Math.Clamp(offsets[i],offsets[i+1]-reach,offsets[i+1]+reach);
+            }
             for(int i=0;i<count;i++) offsets[i]=Math.Clamp(offsets[i],lowerBounds[i],upperBounds[i]);
         }
         float maximum=offsets.Select(Math.Abs).Max();
@@ -118,6 +143,47 @@ public static class WideTurnPlanner
             }
             return best ?? new(point,1.75f,1.75f,3.5f);
         }
+    }
+
+    private sealed record Corner(int Start,int End,int Sign,float Radius,float EntryOffset,float ExitOffset,float[] Angles);
+
+    private static List<Corner> FindCorners(Vector3[] points,float[] along,float[] curvature,RigGeometry rig,Func<Vector3,RoadEnvelope> envelope)
+    {
+        var result=new List<Corner>();
+        for(int i=2;i<curvature.Length-2;i++)
+        {
+            if(Math.Abs(curvature[i])<1f/180) continue;
+            int start=i, sign=Math.Sign(curvature[i]);
+            while(i+1<curvature.Length-2 && Math.Sign(curvature[i+1])==sign && Math.Abs(curvature[i+1])>=1f/180) i++;
+            int end=i;
+            var angles=new float[end-start+1];
+            float peak=0;
+            for(int j=start;j<=end;j++)
+            {
+                peak=Math.Max(peak,Math.Abs(curvature[j]));
+                if(j>start) angles[j-start]=angles[j-start-1]+Math.Abs(curvature[j-1]+curvature[j])*0.5f*(along[j]-along[j-1]);
+            }
+            // An isolated kink or shallow highway bend is not a junction turn.
+            if(angles[^1]<MathF.PI/5 || end-start<3) continue;
+            float radius=1/peak;
+            float own=Math.Max(0,envelope(points[start]).LaneWidth/2-rig.HalfWidth-0.3f);
+            float deficit=MathF.Sqrt(radius*radius+rig.TrackingSpan*rig.TrackingSpan)-radius-own;
+            if(deficit<=0.1f) continue;
+            float exit=Math.Clamp(deficit+0.3f,0,4.5f);
+            result.Add(new(start,end,sign,radius,Math.Min(2,exit*0.4f),exit,angles));
+        }
+        return result;
+    }
+
+    private static float DelayedOffset(Corner corner,float angle)
+    {
+        float extra=corner.ExitOffset-corner.EntryOffset;
+        if(extra<0.01f) return corner.EntryOffset;
+        // For a circular corner, (R+entry)/cos(angle)-R keeps the
+        // tractor on the approach tangent. Blend towards the wider exit arc
+        // smoothly so it starts turning later without a steering discontinuity.
+        float straight=(corner.Radius+corner.EntryOffset)*(1/MathF.Cos(Math.Min(1.45f,angle))-1);
+        return corner.EntryOffset+extra*(1-MathF.Exp(-straight/extra));
     }
 
     private static Vector2 Horizontal(Vector3 value)=>new(value.X,value.Z);

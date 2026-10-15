@@ -20,6 +20,7 @@ public class GameOutput
     private readonly DrivingPlanGuard planGuard = new();
     private readonly BrakeResponseGuard brakeResponse = new();
     private readonly DrivingReadiness readiness = new();
+    private readonly EngineBrakePolicy engineBrake = new();
     private readonly bool personalBuild = PersonalDrivingProfile.IsEnabled;
     public const string UnavailableEvent = "ETS2LA.Game.Output.Unavailable";
     public DrivingPhase Phase => readiness.Phase;
@@ -179,6 +180,7 @@ public class GameOutput
 
     private void ResetOutputs()
     {
+        engineBrake.Reset();
         if (!MemoryAccessAvailable)
             return;
 
@@ -303,12 +305,13 @@ public class GameOutput
 
             var telemetry = GameTelemetry.Current.GetCurrentData();
             long now = Environment.TickCount64;
+            var activity = GameTelemetry.Current.Activity;
             bool controlsReady = MemoryAccessAvailable && planGuard.HasFreshPlan && now - Interlocked.Read(ref lastSteeringAt) < 400 &&
-                now - Interlocked.Read(ref lastPedalAt) < 400 && now - GameTelemetry.Current.LastFreshFrameAt < 400 &&
+                activity.AcceptsControls(now, Interlocked.Read(ref lastSteeringAt), Interlocked.Read(ref lastPedalAt), Interlocked.Read(ref lastPlanAt)) &&
                 (!personalBuild || drivingEnvelope is { HasValidRoute: true } freshEnvelope && freshEnvelope.ValidUntil >= now);
-            var phase = readiness.Update(now, assistsEnabled, telemetry.sdkActive && controlsReady, telemetry.paused);
+            var phase = readiness.Update(now, assistsEnabled, telemetry.sdkActive && controlsReady, activity.IsSuspended(now));
             if (!assistsEnabled) handoverSent = false;
-            if (!assistsEnabled || !telemetry.sdkActive || telemetry.paused)
+            if (!assistsEnabled || !activity.IsLive(now) || activity.Paused)
                 brakeResponse.Update(Environment.TickCount64, 0, assistsEnabled, false, 0, 0, 0, 0);
             #if WINDOWS
             var guard = watchdog;
@@ -316,7 +319,7 @@ public class GameOutput
                 Math.Min(Interlocked.Read(ref lastPlanAt), GameTelemetry.Current.LastFreshFrameAt));
             if (drivingEnvelope is { } latestEnvelope) healthyAt = Math.Min(healthyAt, latestEnvelope.ValidUntil - 600);
             guard?.Pulse(assistsEnabled && readiness.HasEngaged && phase != DrivingPhase.Handover,
-                telemetry.sdkActive && !telemetry.paused && Math.Abs(telemetry.truckFloat.speed) > 1, healthyAt);
+                activity.IsLive(now) && !activity.Paused && Math.Abs(telemetry.truckFloat.speed) > 1, healthyAt);
             #endif
 
             // These || need to be added to silence warnings...
@@ -332,10 +335,11 @@ public class GameOutput
                 continue;
             }
 
-            if (!telemetry.sdkActive || telemetry.paused)
+            if (!telemetry.sdkActive || phase == DrivingPhase.Suspended || activity.Paused)
             {
                 ResetOutputs();
-                SetSafetyStatus(assistsEnabled ? brakeResponse.Failure ?? (telemetry.paused ? _("Game paused") : _("Waiting for the game SDK")) : "");
+                SetSafetyStatus(assistsEnabled ? brakeResponse.Failure ?? (activity.Paused ? _("Game paused; self-driving will resume") :
+                    phase == DrivingPhase.Suspended ? _("Game simulation suspended; self-driving will resume") : _("Waiting for the game SDK")) : "");
                 tickTimer.Restart();
                 continue;
             }
@@ -427,8 +431,11 @@ public class GameOutput
     private void ApplyEngineBrake(float pedal, GameTelemetryData telemetry, bool engaged)
     {
         if (personalBuild && legacyAccessor is { } legacy && legacyShmOffsets.TryGetValue("motorbrake", out int offset))
-            WriteBool(legacy, offset, EngineBrakePolicy.ShouldApply(pedal, telemetry.truckFloat.speed,
-                telemetry.truckFloat.engineRpm, telemetry.truckBool.engineEnabled, engaged));
+        {
+            bool applied = engineBrake.Update(Environment.TickCount64, pedal, telemetry.truckFloat.speed,
+                telemetry.truckFloat.engineRpm, telemetry.truckBool.engineEnabled, engaged);
+            WriteBool(legacy, offset, applied);
+        }
     }
 
     private void ApplyDrivingEnvelope(DrivingEnvelope envelope, float speed)
@@ -482,6 +489,7 @@ public class GameOutput
 
             bool hasRequest = values.Any(v => float.IsFinite(v.Item1) && v.Item1 > 0 && float.IsFinite(v.Item2));
             float weightedValue = ControlMixer.Resolve(values, brakePriority: propName == "acceleration");
+            if (propName == "acceleration" && engineBrake?.Applied == true) weightedValue = Math.Min(0, weightedValue);
 
             if(propName == "steering")
             {
@@ -502,7 +510,7 @@ public class GameOutput
                     WriteDouble(modern, 18, time);
                     WriteBool(modern, 17, true);
                 }
-                else if (GameSettings.Current.EnableModernOutputForPedals)
+                else if (personalBuild || GameSettings.Current.EnableModernOutputForPedals)
                 {
                     WriteFloat(legacy, legacyShmOffsets["aforward"], 0);
                     WriteFloat(legacy, legacyShmOffsets["abackward"], 0);

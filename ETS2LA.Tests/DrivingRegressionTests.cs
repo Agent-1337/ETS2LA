@@ -73,7 +73,10 @@ public sealed class DrivingRegressionTests
         Assert.Equal(5, settings.RootElement.GetProperty("DesiredSpeedStaticOffset").GetSingle() * 3.6f, 3);
         Assert.Equal(0, settings.RootElement.GetProperty("DesiredSpeedPercentageOffset").GetInt32());
         const string unrelated = "{\"ManualGamePaths\":[\"C:/Games/ATS\"]}";
-        Assert.Equal(unrelated, PersonalDrivingProfile.ApplyOverrides("GameSettings.json", unrelated));
+        using var game = JsonDocument.Parse(PersonalDrivingProfile.ApplyOverrides("GameSettings.json", unrelated));
+        Assert.Equal("C:/Games/ATS", game.RootElement.GetProperty("ManualGamePaths")[0].GetString());
+        Assert.True(game.RootElement.GetProperty("EnableModernOutputForPedals").GetBoolean());
+        Assert.False(game.RootElement.GetProperty("EnableAutomaticObstaclePassing").GetBoolean());
     }
 
     [Fact]

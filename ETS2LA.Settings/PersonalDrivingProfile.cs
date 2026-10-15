@@ -12,6 +12,7 @@ public static class PersonalDrivingProfile
     private static readonly Dictionary<string, string> Overrides = new(StringComparer.OrdinalIgnoreCase)
     {
         ["WindowSettings.json"] = """{"StayOnTop":false}""",
+        ["GameSettings.json"] = """{"EnableModernOutputForPedals":true,"EnableAutomaticObstaclePassing":false}""",
         ["StateSettings.json"] = """
             {"DisplayUnits":0,"DesiredSpeedStaticOffset":1.3888889,"DesiredSpeedPercentageOffset":0,"FallbackSpeed":8.333334}
             """,

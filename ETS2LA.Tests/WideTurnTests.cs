@@ -38,9 +38,9 @@ public sealed class WideTurnTests
     public void RightTurnPrepositionsLeftBeforeTheBendAndKeepsAWideArc()
     {
         var scene=Turn();var plan=WideTurnPlanner.Build(scene);
-        Assert.True(plan.IsActive); Assert.InRange(plan.MaximumOffset,1.8f,2.001f);
+        Assert.True(plan.IsActive); Assert.InRange(plan.MaximumOffset,3,4.501f);
         Assert.True(Offset(scene,plan,new(0,0,-20)) < -0.8f);
-        Assert.True(Offset(scene,plan,new(0,0,0)) < -1.5f);
+        Assert.True(Offset(scene,plan,new(0,0,0)) < -1);
         Assert.True(Offset(scene,plan,new(25*(1-MathF.Cos(MathF.PI/4)),0,25*MathF.Sin(MathF.PI/4))) < -1.5f);
         Assert.InRange(Offset(scene,plan,new(155,0,25)),-0.01f,0.01f);
     }
@@ -54,6 +54,67 @@ public sealed class WideTurnTests
             Assert.Equal(right.Route.Points[i].X,-left.Route.Points[i].X,3);
             Assert.Equal(right.Route.Points[i].Z,left.Route.Points[i].Z,3);
         }
+    }
+
+    [Fact]
+    public void TightCornerContinuesAlongTheApproachTangentBeforeTurningAndKeepsTheWiderExit()
+    {
+        var scene=Turn();var plan=WideTurnPlanner.Build(scene);
+        int entry=Enumerable.Range(0,scene.Route.Points.Length).MinBy(i=>scene.Route.Points[i].LengthSquared());
+        int early=entry+3;
+        float nativeInward=scene.Route.Points[early].X-scene.Route.Points[entry].X;
+        float wideInward=plan.Route.Points[early].X-plan.Route.Points[entry].X;
+        Assert.True(nativeInward>0.6f);
+        Assert.True(wideInward<nativeInward*0.5f,$"Early inward travel: nominal {nativeInward:F2} m, delayed {wideInward:F2} m");
+        Assert.True(plan.Route.Points[early].Z>scene.Route.Points[early].Z);
+        Assert.True(Offset(scene,plan,new(40,0,25)) < -3); // Exit is allowed into the empty same-direction lane.
+        for(int i=0;i<plan.Route.Points.Length;i++)
+        {
+            float offset=Offset(scene,plan,scene.Route.Points[i]);var bounds=scene.Route.RoadEnvelopes![i];
+            Assert.True(offset-scene.Rig!.HalfWidth>=-bounds.Left+0.299f);
+            Assert.True(offset+scene.Rig.HalfWidth<=bounds.Right-0.299f);
+        }
+    }
+
+    [Fact]
+    public void ACarInTheExitLanePreventsTheDelayedWideSweepThroughItsBody()
+    {
+        var scene=Turn() with {Obstacles=[new("parked:left","car",new(60,0,28.5f),1,0,1,6)]};
+        var plan=WideTurnPlanner.Build(scene);
+        float offset=Offset(scene,plan,new(60,0,25));
+        Assert.True(offset>=-0.701f,$"Exit offset {offset:F2} m overlaps an occupied lane");
+    }
+
+    [Fact]
+    public void ProductionJunctionSteeringProjectsAndSamplesTheDelayedTargetsAtTheActualTruckPosition()
+    {
+        var curve=new NavCurve {StartPosition=Vector3.Zero,EndPosition=new(25,0,25),StartRotation=MathEx.GetNodeRotation(Vector3.UnitZ),EndRotation=MathEx.GetNodeRotation(Vector3.UnitX),Length=40};
+        var prefab=new PrefabPath(null!,null!,null!,[curve],Direction.Forward,Matrix4x4.Identity,Vector3.Zero);
+        var points=Enumerable.Range(-30,30).Select(i=>new Vector3(0,0,i*2))
+            .Concat(Enumerable.Range(0,41).Select(i=>prefab.InterpolateDist(i)!.Value.Position))
+            .Concat(Enumerable.Range(1,60).Select(i=>new Vector3(25+i*2,0,25))).ToArray();
+        var route=new RouteCorridor(points,2,1,0,-4.5f,0,false,RoadEnvelopes:points.Select(p=>new RoadEnvelope(p,6.75f,2.25f,4.5f)).ToArray());
+        var scene=Turn() with {Route=route,Rig=new(40,1.3f,[],0,1,true,24)};
+        var plan=WideTurnPlanner.Build(scene);Assert.True(plan.IsActive);
+        SteeringTrajectory.Publish(plan.Frame);
+        try
+        {
+            var nominal=prefab.Interpolate(0.5f)!.Value;
+            using(PluginExecutionContext.Enter("tumppi066.laneassist"))
+            {
+                var actual=prefab.Interpolate(0.5f)!.Value;
+                Assert.True(Vector3.Distance(actual.Position,nominal.Position)>2,$"Nominal {nominal.Position}, actual {actual.Position}, maximum offset {plan.MaximumOffset}");
+                foreach(float t in new[] {0.05f,0.15f,0.3f,0.5f,0.7f,0.9f})
+                {
+                    var truck=prefab.Interpolate(t)!.Value;
+                    float projected=prefab.GetFactorForPoint(truck.Position);
+                    Assert.InRange(projected,t-0.002f,t+0.002f);
+                    Assert.True(Vector3.Distance(prefab.Interpolate(projected)!.Value.Position,truck.Position)<0.1f);
+                }
+            }
+            Assert.Equal(nominal,prefab.Interpolate(0.5f)!.Value);
+        }
+        finally {SteeringTrajectory.Publish(null);}
     }
 
     [Fact]
@@ -112,7 +173,8 @@ public sealed class WideTurnTests
             float offset=Offset(scene,plan,scene.Route.Points[i]);
             float previous=Offset(scene,plan,scene.Route.Points[i-1]);
             float distance=Vector3.Distance(scene.Route.Points[i],scene.Route.Points[i-1]);
-            Assert.True(Math.Abs(offset-previous)<=distance*0.101f+0.005f);
+            float limit=scene.Route.Points[i].Z>0 && scene.Route.Points[i].X<25 ? 0.251f : 0.101f;
+            Assert.True(Math.Abs(offset-previous)<=distance*limit+0.005f);
             last=offset;
         }
         Assert.True(Offset(scene,plan,new(40,0,25)) < -1.5f); // Trailer is still in the bend.
